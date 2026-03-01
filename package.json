@@ -1,0 +1,12 @@
+{
+  "name": "plantuml-editor",
+  "version": "1.0.0",
+  "description": "PlantUML Editor with Kroki rendering and diagram sharing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}
