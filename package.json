@@ -1,12 +1,13 @@
 {
-  "name": "plantuml-editor",
+  "name": "seq-diag-editor",
   "version": "1.0.0",
-  "description": "PlantUML Editor with Kroki rendering and diagram sharing",
+  "description": "Sequence Diagram Editor (PlantUML + Mermaid) with Kroki rendering and diagram sharing",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "@upstash/redis": "^1.36.3",
     "express": "^4.21.0"
   }
 }
