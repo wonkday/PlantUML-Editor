@@ -1,0 +1,1327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mermaid Sequence Editor</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/default.min.css">
+<link rel="stylesheet" href="/toolbar.css">
+<style>
+  :root {
+    --bg: #f5f5f5; --surface: #fff; --border: #ddd; --text: #222;
+    --toolbar-bg: #7b1fa2; --toolbar-text: #fff; --accent: #7b1fa2;
+    --status-bg: #f3e5f5; --status-text: #7b1fa2;
+    --hover: rgba(0,0,0,.06);
+  }
+  .dark {
+    --bg: #1e1e1e; --surface: #252526; --border: #3c3c3c; --text: #ccc;
+    --toolbar-bg: #3c1451; --toolbar-text: #ccc; --accent: #ce93d8;
+    --status-bg: #3c1451; --status-text: #ce93d8;
+    --hover: rgba(255,255,255,.08);
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+
+  .main { display: flex; flex: 1; overflow: hidden; }
+  .editor-pane, .preview-pane { display: flex; flex-direction: column; overflow: hidden; }
+  .editor-pane { flex: 1; min-width: 200px; background: var(--surface); border-right: 1px solid var(--border); }
+  .preview-pane { flex: 1; min-width: 200px; background: var(--bg); }
+
+  .pane-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .5px; color: var(--accent);
+    background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .pane-header .controls { display: flex; gap: 4px; }
+  .pane-header button {
+    background: none; border: 1px solid var(--border); color: var(--text);
+    padding: 2px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;
+  }
+  .pane-header button:hover { background: var(--hover); }
+  .pane-header button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .editor-wrap { flex: 1; overflow: hidden; }
+  .editor-wrap .CodeMirror { height: 100%; font-size: 13px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; }
+
+  .preview-wrap {
+    flex: 1; overflow: auto; display: flex; align-items: flex-start;
+    justify-content: center; padding: 16px; position: relative;
+  }
+  .preview-wrap svg { max-width: none; transition: transform .1s; transform-origin: top left; }
+  .preview-wrap .error-msg {
+    color: #f44336; background: rgba(244,67,54,.08); border: 1px solid rgba(244,67,54,.2);
+    border-radius: 6px; padding: 16px 20px; font-size: 13px; white-space: pre-wrap;
+    max-width: 600px; margin: 40px auto;
+  }
+
+  .resizer {
+    width: 5px; cursor: col-resize; background: var(--border);
+    flex-shrink: 0; transition: background .15s; z-index: 5;
+  }
+  .resizer:hover, .resizer.active { background: var(--accent); }
+
+  .zoom-indicator { display: none; }
+
+  .zoom-bar {
+    display: flex; align-items: center; gap: 4px;
+    margin-left: auto; margin-right: 8px;
+  }
+  .zoom-bar button {
+    background: none; border: 1px solid var(--border); color: var(--text);
+    width: 22px; height: 22px; border-radius: 3px; font-size: 14px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    padding: 0; line-height: 1;
+  }
+  .zoom-bar button:hover { background: var(--hover); }
+  .zoom-bar input.zoom-input {
+    width: 48px; text-align: center; border: 1px solid var(--border);
+    border-radius: 3px; background: var(--bg); color: var(--text);
+    font-size: 11px; padding: 2px 2px; font-family: inherit;
+  }
+  .zoom-bar input.zoom-input:focus { outline: none; border-color: var(--accent); }
+  .zoom-bar .zoom-label { font-size: 10px; opacity: .6; text-transform: none; font-weight: 400; }
+
+  .editor-pane.collapsed { flex: 0 0 0 !important; width: 0 !important; min-width: 0 !important; overflow: hidden; border-right: none; }
+  .preview-pane.collapsed { flex: 0 0 0 !important; width: 0 !important; min-width: 0 !important; overflow: hidden; }
+  .editor-pane.collapsed + .resizer { display: none; }
+  .resizer:has(+ .preview-pane.collapsed) { display: none; }
+  .pane-header button.collapse-btn { font-size: 14px; line-height: 1; padding: 2px 6px; opacity: .6; }
+  .pane-header button.collapse-btn:hover { opacity: 1; background: var(--hover); }
+  .pane-header button.collapse-btn.restore { font-size: 11px; padding: 2px 8px; background: var(--accent); color: #fff; border-color: var(--accent); opacity: 1; }
+
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45);
+    z-index: 100; align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 24px; min-width: 420px; max-width: 90vw;
+    box-shadow: 0 8px 32px rgba(0,0,0,.3);
+  }
+  .modal h3 { margin-bottom: 16px; font-size: 15px; color: var(--accent); }
+  .modal textarea {
+    width: 100%; min-height: 220px; padding: 10px; border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); color: var(--text); font-size: 13px; font-family: 'Consolas', monospace;
+    resize: vertical; line-height: 1.5;
+  }
+  .modal textarea:focus { outline: none; border-color: var(--accent); }
+  .modal .hint { font-size: 11px; opacity: .6; margin-top: 6px; }
+  .modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+  .modal .modal-actions button {
+    padding: 6px 16px; border-radius: 4px; font-size: 12px; cursor: pointer; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text);
+  }
+  .modal .modal-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .modal .modal-actions button:hover { opacity: .85; }
+
+  /* Share popover */
+  .share-popover {
+    display: none; position: fixed; z-index: 110;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; min-width: 380px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.25);
+  }
+  .share-popover.open { display: block; }
+  .share-popover .share-title { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+  .share-popover .share-url-row { display: flex; gap: 6px; }
+  .share-popover .share-url-row input {
+    flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); color: var(--text); font-size: 12px; font-family: 'Consolas', monospace;
+  }
+  .share-popover .share-url-row button {
+    padding: 6px 14px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    border: none; background: var(--accent); color: #fff;
+  }
+  .share-popover .share-meta { font-size: 11px; opacity: .6; margin-top: 8px; }
+
+  /* Settings modal extras */
+  .modal label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; margin-top: 12px; }
+  .modal select, .modal input[type="number"] {
+    width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); color: var(--text); font-size: 13px;
+  }
+  .modal select:focus, .modal input[type="number"]:focus { outline: none; border-color: var(--accent); }
+
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: #333; color: #fff; padding: 10px 24px; border-radius: 6px;
+    font-size: 13px; z-index: 200; opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- Toolbar -->
+<div class="toolbar-row">
+  <span class="brand"><span class="brand-name">&#9670; Diagram Editor</span><span class="brand-sub">by Rohit</span></span>
+  <a href="/" class="tab">PlantUML</a>
+  <a href="/mermaid" class="tab active">Mermaid</a>
+  <a href="/gliffy" class="tab">Gliffy</a>
+  <div class="sep"></div>
+  <div class="dropdown" id="menuFile">
+    <button class="dropdown-toggle">File &#9662;</button>
+    <div class="dropdown-content">
+      <button id="btnNew">&#128196; New</button>
+      <button id="btnOpen">&#128194; Open File...</button>
+      <input type="file" id="fileInput" class="file-input" accept=".mmd,.mermaid,.txt">
+      <button id="btnSave">&#128190; Save</button>
+    </div>
+  </div>
+  <div class="dropdown" id="menuExport">
+    <button class="dropdown-toggle">Export &#9662;</button>
+    <div class="dropdown-content">
+      <button id="btnSvg">SVG</button>
+      <button id="btnPng">PNG</button>
+      <hr>
+      <button id="btnSplitPng">Split PNGs (ZIP)</button>
+      <button id="btnSectionPng">Section PNGs (ZIP)</button>
+    </div>
+  </div>
+  <div class="dropdown" id="menuConvert">
+    <button class="dropdown-toggle">Convert &#9662;</button>
+    <div class="dropdown-content">
+      <button id="btnConvertPlantUML">To PlantUML</button>
+      <button disabled>To Mermaid</button>
+      <button id="btnConvertGliffy">To Gliffy JSON</button>
+    </div>
+  </div>
+  <div class="dropdown" id="menuView">
+    <button class="dropdown-toggle">View &#9662;</button>
+    <div class="dropdown-content">
+      <label><input type="checkbox" id="chkAuto" checked> Auto-render</label>
+      <hr>
+      <button id="btnZoomIn">Zoom In</button>
+      <button id="btnZoomOut">Zoom Out</button>
+      <button id="btnFit">Fit to View</button>
+    </div>
+  </div>
+  <div class="sep"></div>
+  <button id="btnRender" title="Render now (Ctrl+Enter)">&#9654; Render</button>
+  <button id="btnShare" title="Share diagram via link">&#128279; Share</button>
+  <button id="btnSettings" title="Settings">&#9881;</button>
+  <button id="btnTheme" title="Toggle dark/light">&#127763;</button>
+  <span class="status" id="status">Ready</span>
+</div>
+
+<div class="main">
+  <div class="editor-pane" id="editorPane">
+    <div class="pane-header">
+      <span id="fileName">editor</span>
+      <div class="controls">
+        <button id="btnWrap">Wrap</button>
+        <button id="btnNumbers" class="active">Ln</button>
+        <button id="btnCollapseEditor" class="collapse-btn" title="Collapse editor">&#9668;</button>
+      </div>
+    </div>
+    <div class="editor-wrap">
+      <textarea id="editor"></textarea>
+    </div>
+  </div>
+
+  <div class="resizer" id="resizer"></div>
+
+  <div class="preview-pane" id="previewPane">
+    <div class="pane-header">
+      <span>preview <span id="diagramInfo" class="diagram-info"></span></span>
+      <div class="zoom-bar">
+        <button id="btnZoomOut2" title="Zoom out">&#8722;</button>
+        <input type="text" class="zoom-input" id="zoomInput" value="100%" title="Type zoom % and press Enter">
+        <button id="btnZoomIn2" title="Zoom in">&#43;</button>
+        <button id="btnFit2" title="Fit to view" style="font-size:11px; width:auto; padding:0 6px;">Fit</button>
+      </div>
+      <div class="controls">
+        <span class="section-hdr-btns" id="sectionHdrBtns">
+          <button class="sec-hdr-btn" id="btnSecColAll" title="Collapse all sections">&#9662; Collapse All</button>
+          <button class="sec-hdr-btn" id="btnSecExpAll" title="Expand all sections">&#9652; Expand All</button>
+        </span>
+        <span class="ctrl-sep"></span>
+        <button id="btnCollapsePreview" class="collapse-btn" title="Collapse preview">&#9658;</button>
+      </div>
+    </div>
+    <div class="preview-body">
+      <div class="section-gutter" id="sectionGutter"></div>
+      <div class="preview-wrap" id="previewWrap">
+        <div style="color:var(--text); opacity:.4; margin-top:80px; text-align:center;">
+          <p style="font-size:32px;">&#9670;</p>
+          <p style="margin-top:8px;">Write a Mermaid sequence diagram to begin</p>
+          <p style="margin-top:4px; font-size:12px;">Ctrl+Enter to render</p>
+      </div>
+    </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div class="modal-overlay" id="settingsModal">
+  <div class="modal">
+    <h3>&#9881; Settings</h3>
+    <label for="cfgShareMode">Share mode</label>
+    <select id="cfgShareMode">
+      <option value="auto">Auto (URL for small, server for large)</option>
+      <option value="url">URL encoding only</option>
+      <option value="server">Server storage only</option>
+    </select>
+    <div class="hint">How shared links are generated</div>
+    <label for="cfgShareLimit">URL encoding size limit (chars)</label>
+    <input type="number" id="cfgShareLimit" min="100" max="100000" step="100">
+    <div class="hint">Diagrams larger than this use server storage (in Auto mode)</div>
+    <label for="cfgSplitMaxLines">Max lines per split group</label>
+    <input type="number" id="cfgSplitMaxLines" min="10" max="500" step="10">
+    <div class="hint">Controls height of each PNG in "Split PNGs" export</div>
+    <div class="modal-actions">
+      <button id="btnSettingsCancel">Cancel</button>
+      <button id="btnSettingsReset">Reset Defaults</button>
+      <button id="btnSettingsSave" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Share popover -->
+<div class="share-popover" id="sharePopover">
+  <div class="share-title">&#128279; Share Diagram</div>
+  <div class="share-url-row">
+    <input type="text" id="shareUrlInput" readonly>
+    <button id="btnCopyShare">Copy</button>
+  </div>
+  <div class="share-meta" id="shareMeta"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css">
+<script src="/converters.js"></script>
+<script>
+(function() {
+  const DEFAULT_SHARE_MODE = 'auto';
+  const DEFAULT_SHARE_LIMIT = 2000;
+
+  function getShareMode() { return localStorage.getItem('mmd-share-mode') || DEFAULT_SHARE_MODE; }
+  function getShareLimit() { return parseInt(localStorage.getItem('mmd-share-limit'), 10) || DEFAULT_SHARE_LIMIT; }
+
+  function toBase64Url(uint8) {
+    let bin = '';
+    for (let i = 0; i < uint8.length; i++) bin += String.fromCharCode(uint8[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function fromBase64Url(str) {
+    str = str.replace(/-/g, '+').replace(/_/g, '/');
+    while (str.length % 4) str += '=';
+    const bin = atob(str);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return arr;
+  }
+  function compressToUrl(text) {
+    return toBase64Url(pako.deflate(new TextEncoder().encode(text)));
+  }
+  function decompressFromUrl(encoded) {
+    return new TextDecoder().decode(pako.inflate(fromBase64Url(encoded)));
+  }
+
+  const DEBOUNCE_MS = 600;
+  let zoom = 1;
+  let lastSvg = '';
+  let renderTimer = null;
+  let currentFileName = '';
+  let renderCounter = 0;
+  let loadedFromShare = false;
+
+  const $ = id => document.getElementById(id);
+  const statusEl = $('status');
+  const previewWrap = $('previewWrap');
+  const fileNameEl = $('fileName');
+  const diagramInfo = $('diagramInfo');
+
+  // --- Dropdown menu behavior ---
+  document.querySelectorAll('.dropdown').forEach(dd => {
+    const toggle = dd.querySelector('.dropdown-toggle');
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wasOpen = dd.classList.contains('open');
+      document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+      if (!wasOpen) dd.classList.add('open');
+    });
+    dd.querySelectorAll('.dropdown-content button').forEach(btn => {
+      btn.addEventListener('click', () => dd.classList.remove('open'));
+    });
+  });
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+  });
+
+  mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+
+  function showToast(msg, duration) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.classList.remove('show'), duration || 2500);
+  }
+
+  const mermaidFoldFinder = function(cm, start) {
+    const line = cm.getLine(start.line);
+    const trimmed = line.trim();
+    if (/^%%\s*==\s*.+\s*==\s*$/.test(trimmed)) {
+      for (let i = start.line + 1; i < cm.lineCount(); i++) {
+        const l = cm.getLine(i).trim();
+        if (/^%%\s*==\s*.+\s*==\s*$/.test(l)) {
+          const end = i - 1;
+          if (end > start.line) {
+            return { from: CodeMirror.Pos(start.line, line.length),
+                     to: CodeMirror.Pos(end, cm.getLine(end).length) };
+          }
+          return null;
+        }
+      }
+      const last = cm.lineCount() - 1;
+      if (last > start.line) {
+        return { from: CodeMirror.Pos(start.line, line.length),
+                 to: CodeMirror.Pos(last, cm.getLine(last).length) };
+      }
+      return null;
+    }
+    if (!/^(alt|else|opt|loop|par|critical|break)\b/i.test(trimmed)) return null;
+    const isElse = /^else\b/i.test(trimmed);
+    let depth = isElse ? 0 : 1;
+    for (let i = start.line + 1; i < cm.lineCount(); i++) {
+      const l = cm.getLine(i).trim();
+      if (/^(alt|opt|loop|par|critical|break)\b/i.test(l)) depth++;
+      if (/^else\b/i.test(l) && depth === (isElse ? 0 : 1)) {
+        return { from: CodeMirror.Pos(start.line, line.length),
+                 to: CodeMirror.Pos(i - 1, cm.getLine(i - 1).length) };
+      }
+      if (/^end\b/i.test(l)) {
+        depth--;
+        if (depth === 0) {
+          return { from: CodeMirror.Pos(start.line, line.length),
+                   to: CodeMirror.Pos(i, cm.getLine(i).length) };
+        }
+      }
+    }
+    return null;
+  };
+
+  const cm = CodeMirror.fromTextArea($('editor'), {
+    lineNumbers: true, matchBrackets: true, autoCloseBrackets: true,
+    tabSize: 2, indentWithTabs: false, lineWrapping: false, theme: 'default',
+    foldGutter: { rangeFinder: mermaidFoldFinder },
+    gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+    extraKeys: { 'Ctrl-Q': function(cm) { cm.foldCode(cm.getCursor(), mermaidFoldFinder); } },
+  });
+
+  const SAMPLE = `sequenceDiagram
+    participant Alice
+    participant Bob
+    Alice->>Bob: Hello Bob, how are you?
+    Bob-->>Alice: I am good thanks!
+    Alice-)Bob: See you later!`;
+
+  async function initContent() {
+    const hash = window.location.hash;
+    if (hash.startsWith('#mmd=')) {
+      try {
+        const text = decompressFromUrl(hash.slice(5));
+        cm.setValue(text);
+        loadedFromShare = true;
+        fileNameEl.textContent = 'shared diagram';
+        setStatus('Loaded from shared link', 'ok');
+        setTimeout(render, 100);
+        return;
+      } catch (e) {
+        setStatus('Failed to decode shared link', 'err');
+      }
+    } else if (hash.startsWith('#id=')) {
+      try {
+        const id = hash.slice(4);
+        setStatus('Loading shared diagram...', 'loading');
+        const resp = await fetch(`/api/share/${id}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        cm.setValue(data.content);
+        loadedFromShare = true;
+        fileNameEl.textContent = `shared:${id}`;
+        setStatus('Loaded from server', 'ok');
+        setTimeout(render, 100);
+        return;
+      } catch (e) {
+        setStatus('Failed to load shared diagram', 'err');
+      }
+    }
+    const payload = DiagramConverters.checkConvertPayload();
+    if (payload && payload.target === 'mermaid') {
+      cm.setValue(payload.content);
+      fileNameEl.textContent = 'converted';
+      setStatus('Loaded from conversion', 'ok');
+      setTimeout(render, 100);
+      return;
+    }
+
+    const cached = localStorage.getItem('mermaid-editor-content');
+    cm.setValue(cached !== null ? cached : SAMPLE);
+  }
+
+  initContent();
+
+  cm.on('change', () => localStorage.setItem('mermaid-editor-content', cm.getValue()));
+
+  function setStatus(text, type) {
+    statusEl.textContent = text;
+    statusEl.className = 'status' + (type ? ' ' + type : '');
+  }
+
+  function styleSectionNotes(svgEl) {
+    const isDark = document.body.classList.contains('dark');
+    const fill = isDark ? '#2A4A6B' : '#D6E8F8';
+    const stroke = isDark ? '#4A7AAB' : '#90B8D8';
+    const textColor = isDark ? '#E0E8F0' : '#1A3A5C';
+    svgEl.querySelectorAll('text.noteText').forEach(textEl => {
+      const content = textEl.textContent || '';
+      if (!/^==\s.+\s==$/.test(content.trim())) return;
+      const g = textEl.closest('g');
+      if (!g) return;
+      const rect = g.querySelector('rect');
+      if (rect) {
+        rect.setAttribute('fill', fill);
+        rect.setAttribute('stroke', stroke);
+        rect.setAttribute('rx', '0');
+        rect.setAttribute('ry', '0');
+      }
+      textEl.querySelectorAll('tspan').forEach(ts => {
+        ts.setAttribute('fill', textColor);
+        ts.style.fontWeight = '700';
+        ts.style.fontSize = '14px';
+      });
+    });
+  }
+
+  // --- Section collapse (viewer) ---
+  const MMD_SECTION_RE = /^%%\s*==\s*(.+?)\s*==\s*$/;
+  const collapsedSections = new Set();
+
+  function parseSections(source) {
+    const lines = source.split(/\r?\n/);
+    const sections = [];
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].trim().match(MMD_SECTION_RE);
+      if (m) {
+        if (sections.length) sections[sections.length - 1].endLine = i - 1;
+        const fullText = m[1];
+        const sm = fullText.match(/^Section\s+([\w]+)[:\s]*(.*)/i);
+        sections.push({
+          id: sm ? sm[1] : String(sections.length + 1),
+          title: sm ? (sm[2].trim() || fullText) : fullText,
+          fullText: fullText,
+          startLine: i,
+          endLine: lines.length - 1,
+        });
+      }
+    }
+    return sections;
+  }
+
+  function buildSectionCollapsedSource(source, collapsed) {
+    if (!collapsed.size) return source;
+    const lines = source.split(/\r?\n/);
+    const sections = parseSections(source);
+    if (!sections.length) return source;
+    const out = [];
+    let skipUntil = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (i <= skipUntil) continue;
+      const sec = sections.find(s => i === s.startLine);
+      if (sec && collapsed.has(sec.id)) {
+        out.push(lines[i]);
+        skipUntil = sec.endLine;
+        continue;
+      }
+      out.push(lines[i]);
+    }
+    return out.join('\n');
+  }
+
+  function findSectionInSvg(svgEl, sec, usedEls) {
+    const textEls = Array.from(svgEl.querySelectorAll('text'));
+    const candidates = [sec.fullText, sec.title];
+    for (const needle of candidates) {
+      const norm = needle.toLowerCase();
+      const found = textEls.find(el => {
+        if (usedEls.has(el)) return false;
+        const t = (el.textContent || '').trim().toLowerCase();
+        return t === norm || t.includes(norm);
+      });
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function updateSectionControls(source) {
+    const gutter = $('sectionGutter');
+    const hdr = $('sectionHdrBtns');
+    const sections = parseSections(source);
+    if (!sections.length) {
+      gutter.classList.remove('visible');
+      hdr.style.display = 'none';
+      gutter.innerHTML = '';
+      return;
+    }
+    hdr.style.display = 'inline-flex';
+    const svgEl = previewWrap.querySelector('svg');
+    if (!svgEl) { gutter.classList.remove('visible'); gutter.innerHTML = ''; return; }
+
+    gutter.classList.add('visible');
+    gutter.innerHTML = '';
+    const svgRect = svgEl.getBoundingClientRect();
+    const wrapRect = previewWrap.getBoundingClientRect();
+    const offsetTop = svgRect.top - wrapRect.top + previewWrap.scrollTop;
+
+    const inner = document.createElement('div');
+    inner.className = 'sg-inner';
+    inner.style.height = svgRect.height + offsetTop + 16 + 'px';
+
+    const displaySrc = buildSectionCollapsedSource(source, collapsedSections);
+    const displaySections = parseSections(displaySrc);
+    const displayLines = displaySrc.split(/\r?\n/).length;
+    const usedEls = new Set();
+
+    for (let i = 0; i < sections.length; i++) {
+      const sec = sections[i];
+      const dSec = displaySections.find(d => d.id === sec.id);
+      const textEl = findSectionInSvg(svgEl, sec, usedEls);
+      if (textEl) usedEls.add(textEl);
+
+      const isColl = collapsedSections.has(sec.id);
+      const btn = document.createElement('button');
+      btn.className = 'sg-toggle' + (isColl ? ' collapsed' : '');
+      btn.textContent = isColl ? '\u25b6' : '\u25bc';
+      btn.title = sec.title || sec.fullText;
+      btn.onclick = () => {
+        if (collapsedSections.has(sec.id)) collapsedSections.delete(sec.id);
+        else collapsedSections.add(sec.id);
+        render();
+      };
+      let y;
+      if (textEl) {
+        const elRect = textEl.getBoundingClientRect();
+        y = elRect.top - svgRect.top + offsetTop;
+      } else if (dSec) {
+        y = (dSec.startLine / displayLines) * svgRect.height + offsetTop;
+      } else {
+        y = (i / sections.length) * svgRect.height + offsetTop;
+      }
+      btn.style.top = Math.max(0, y) + 'px';
+      inner.appendChild(btn);
+    }
+    gutter.appendChild(inner);
+    previewWrap.onscroll = () => { gutter.scrollTop = previewWrap.scrollTop; };
+    gutter.scrollTop = previewWrap.scrollTop;
+  }
+
+  $('btnSecColAll').onclick = () => {
+    const secs = parseSections(cm.getValue().trim());
+    for (const s of secs) collapsedSections.add(s.id);
+    render();
+  };
+  $('btnSecExpAll').onclick = () => { collapsedSections.clear(); render(); };
+
+  async function render() {
+    const src = cm.getValue().trim();
+    if (!src) { previewWrap.innerHTML = ''; setStatus('Empty', ''); return; }
+
+    const displaySrc = buildSectionCollapsedSource(src, collapsedSections);
+
+    setStatus('Rendering...', 'loading');
+    try {
+      renderCounter++;
+      const id = `mermaid-svg-${renderCounter}`;
+      const { svg } = await mermaid.render(id, displaySrc);
+      lastSvg = svg;
+      previewWrap.innerHTML = svg;
+      const svgEl = previewWrap.querySelector('svg');
+      if (svgEl) {
+        svgEl.style.transform = `scale(${zoom})`;
+        svgEl.style.transformOrigin = 'top left';
+        svgEl.style.maxWidth = 'none';
+        styleSectionNotes(svgEl);
+      }
+      updateSectionControls(src);
+      updateZoomIndicator();
+      const lines = src.split('\n').length;
+      diagramInfo.textContent = `${lines} lines`;
+      setStatus('OK', 'ok');
+    } catch (e) {
+      previewWrap.innerHTML = `<div class="error-msg">Render Error:\n${e.message || e}</div>`;
+      setStatus('Error', 'err');
+    }
+  }
+
+  function scheduleRender() {
+    if (!$('chkAuto').checked) return;
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(render, DEBOUNCE_MS);
+  }
+  cm.on('change', scheduleRender);
+
+  // --- Zoom ---
+  function setZoom(z) {
+    zoom = Math.max(0.1, Math.min(5, z));
+    const svg = previewWrap.querySelector('svg');
+    if (svg) svg.style.transform = `scale(${zoom})`;
+    updateZoomIndicator();
+  }
+  const zoomInput = $('zoomInput');
+  function updateZoomIndicator() {
+    zoomInput.value = `${Math.round(zoom * 100)}%`;
+  }
+  function fitToView() {
+    const svg = previewWrap.querySelector('svg');
+    if (!svg) return;
+    svg.style.transform = 'scale(1)';
+    const sr = svg.getBoundingClientRect(), wr = previewWrap.getBoundingClientRect();
+    setZoom(Math.min(wr.width / sr.width, wr.height / sr.height, 2) * 0.95);
+  }
+  $('btnZoomIn').onclick = () => setZoom(zoom + 0.15);
+  $('btnZoomOut').onclick = () => setZoom(zoom - 0.15);
+  $('btnFit').onclick = fitToView;
+  $('btnZoomIn2').onclick = () => setZoom(zoom + 0.15);
+  $('btnZoomOut2').onclick = () => setZoom(zoom - 0.15);
+  $('btnFit2').onclick = fitToView;
+  zoomInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const val = parseInt(zoomInput.value, 10);
+      if (!isNaN(val) && val > 0) setZoom(val / 100);
+      zoomInput.blur();
+    }
+  });
+  zoomInput.addEventListener('blur', () => updateZoomIndicator());
+  previewWrap.addEventListener('wheel', (e) => {
+    if (e.ctrlKey) { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 0.1 : -0.1)); }
+  }, { passive: false });
+
+  // --- Keyboard shortcuts ---
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); render(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveFile(); }
+    if (e.key === 'Escape') {
+      if (settingsModal.classList.contains('open')) settingsModal.classList.remove('open');
+      if (sharePopover.classList.contains('open')) sharePopover.classList.remove('open');
+    }
+  });
+
+  $('btnRender').onclick = render;
+
+  // --- File operations ---
+  $('btnNew').onclick = () => {
+    if (cm.getValue().trim() && !confirm('Discard current diagram and start fresh?')) return;
+    cm.setValue('sequenceDiagram\n    ');
+    currentFileName = '';
+    fileNameEl.textContent = 'editor';
+    loadedFromShare = false;
+    history.replaceState(null, '', window.location.pathname);
+    render();
+  };
+
+  $('btnOpen').onclick = () => $('fileInput').click();
+  $('fileInput').onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    currentFileName = file.name;
+    fileNameEl.textContent = file.name;
+    const reader = new FileReader();
+    reader.onload = (ev) => { cm.setValue(ev.target.result); render(); };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  $('btnSave').onclick = saveFile;
+  function saveFile() {
+    const blob = new Blob([cm.getValue()], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = currentFileName || 'diagram.mmd';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus('Saved', 'ok');
+  }
+
+  // --- Export ---
+  $('btnSvg').onclick = () => {
+    if (!lastSvg) { setStatus('Nothing to export', 'err'); return; }
+    const blob = new Blob([lastSvg], { type: 'image/svg+xml' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (currentFileName || 'diagram').replace(/\.(mmd|mermaid)$/i, '') + '.svg';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  $('btnPng').onclick = () => {
+    if (!lastSvg) { setStatus('Nothing to export', 'err'); return; }
+    const svg = previewWrap.querySelector('svg');
+    if (!svg) return;
+    const canvas = document.createElement('canvas');
+    const svgData = new XMLSerializer().serializeToString(svg);
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.naturalWidth * 2;
+      canvas.height = img.naturalHeight * 2;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(2, 2);
+      ctx.drawImage(img, 0, 0);
+      canvas.toBlob((blob) => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (currentFileName || 'diagram').replace(/\.(mmd|mermaid)$/i, '') + '.png';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      });
+    };
+    img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+  };
+
+  // --- Split & Export PNGs ---
+  const DEFAULT_SPLIT_MAX_LINES = 80;
+  function getSplitMaxLines() { return parseInt(localStorage.getItem('mmd-split-max-lines'), 10) || DEFAULT_SPLIT_MAX_LINES; }
+
+  const SECTION_RE = /^%%\s*==\s*Section\s+/i;
+  const MMD_PARTICIPANT_RE = /^\s*participant\s+(\S+)/i;
+  const MMD_ACTOR_RE = /^\s*actor\s+(\S+)/i;
+  const MMD_MSG_RE = /^\s*(\S+?)\s*(->>|-->>|-\)|-x|--x|-)>\s*(\S+?)\s*:/;
+
+  function extractMermaidParticipants(lines) {
+    const declared = [];
+    for (const line of lines) {
+      const pm = line.trim().match(MMD_PARTICIPANT_RE) || line.trim().match(MMD_ACTOR_RE);
+      if (pm) {
+        const parts = line.trim().split(/\s+as\s+/i);
+        declared.push({ alias: pm[1], line: line });
+      }
+    }
+    return declared;
+  }
+
+  function findUsedAliases(contentLines, declaredParticipants) {
+    const aliases = new Set();
+    for (const line of contentLines) {
+      const m = line.trim().match(MMD_MSG_RE);
+      if (m) { aliases.add(m[1]); aliases.add(m[3]); }
+    }
+    if (aliases.size === 0) return declaredParticipants;
+    return declaredParticipants.filter(p => aliases.has(p.alias));
+  }
+
+  function splitMermaidBySections(source, maxLinesPerGroup) {
+    maxLinesPerGroup = maxLinesPerGroup || 80;
+    const lines = source.split(/\r?\n/);
+
+    let headerEnd = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (SECTION_RE.test(lines[i].trim())) { headerEnd = i; break; }
+    }
+    if (headerEnd === -1) return null;
+
+    let h = headerEnd;
+    while (h > 0 && /^\s*$/.test(lines[h - 1])) h--;
+    const header = lines.slice(0, h);
+
+    const preamble = [];
+    const participants = [];
+    for (const line of header) {
+      const pm = line.trim().match(MMD_PARTICIPANT_RE) || line.trim().match(MMD_ACTOR_RE);
+      if (pm) {
+        participants.push({ alias: pm[1], line });
+      } else {
+        preamble.push(line);
+      }
+    }
+
+    const sections = [];
+    let current = null;
+    for (let i = headerEnd; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (SECTION_RE.test(trimmed)) {
+        if (current) sections.push(current);
+        const m = trimmed.match(/^%%\s*==\s*Section\s+([\w]+)[:\s]*(.*?)\s*==\s*$/i);
+        current = {
+          id: m ? m[1] : String(sections.length + 1),
+          title: m ? m[2].trim() : '',
+          lines: [lines[i]],
+        };
+      } else if (current) {
+        current.lines.push(lines[i]);
+      }
+    }
+    if (current) sections.push(current);
+
+    for (const s of sections) {
+      while (s.lines.length && /^\s*$/.test(s.lines[s.lines.length - 1])) s.lines.pop();
+    }
+
+    const groups = [];
+    let currentGrp = [];
+    let currentLines = 0;
+    for (const sec of sections) {
+      const secLines = sec.lines.length;
+      if (currentGrp.length > 0 && currentLines + secLines > maxLinesPerGroup) {
+        groups.push(currentGrp);
+        currentGrp = [sec];
+        currentLines = secLines;
+      } else {
+        currentGrp.push(sec);
+        currentLines += secLines;
+      }
+    }
+    if (currentGrp.length > 0) groups.push(currentGrp);
+
+    return groups.map((group, idx) => {
+      const ids = group.map(s => s.id);
+      const titles = group.map(s => s.title).filter(Boolean).join(', ');
+      const label = ids.length === 1 ? `Section ${ids[0]}` : `Sections ${ids.join('-')}`;
+
+      const contentLines = group.flatMap(s => s.lines);
+      const used = findUsedAliases(contentLines, participants);
+
+      const firstAlias = used.length > 0 ? used[0].alias : participants[0]?.alias || 'A';
+      const lastAlias = used.length > 1 ? used[used.length - 1].alias : firstAlias;
+
+      const out = [...preamble];
+      for (const p of used) out.push(p.line);
+      out.push(`    Note over ${firstAlias},${lastAlias}: Part ${idx + 1} of ${groups.length} — ${label}: ${titles}`);
+      for (let i = 0; i < group.length; i++) {
+        out.push(...group[i].lines.filter(l => !SECTION_RE.test(l.trim())));
+      }
+      return { partNum: idx + 1, ids, label, titles, mmd: out.join('\n') };
+    });
+  }
+
+  function splitMermaidPerSection(source) {
+    const lines = source.split(/\r?\n/);
+
+    let headerEnd = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (SECTION_RE.test(lines[i].trim())) { headerEnd = i; break; }
+    }
+    if (headerEnd === -1) return null;
+
+    let h = headerEnd;
+    while (h > 0 && /^\s*$/.test(lines[h - 1])) h--;
+    const header = lines.slice(0, h);
+
+    const preamble = [];
+    const participants = [];
+    for (const line of header) {
+      const pm = line.trim().match(MMD_PARTICIPANT_RE) || line.trim().match(MMD_ACTOR_RE);
+      if (pm) {
+        participants.push({ alias: pm[1], line });
+      } else {
+        preamble.push(line);
+      }
+    }
+
+    const sections = [];
+    let current = null;
+    for (let i = headerEnd; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (SECTION_RE.test(trimmed)) {
+        if (current) sections.push(current);
+        const m = trimmed.match(/^%%\s*==\s*Section\s+([\w]+)[:\s]*(.*?)\s*==\s*$/i);
+        current = {
+          id: m ? m[1] : String(sections.length + 1),
+          title: m ? m[2].trim() : '',
+          lines: [lines[i]],
+        };
+      } else if (current) {
+        current.lines.push(lines[i]);
+      }
+    }
+    if (current) sections.push(current);
+
+    for (const s of sections) {
+      while (s.lines.length && /^\s*$/.test(s.lines[s.lines.length - 1])) s.lines.pop();
+    }
+
+    return sections.map((sec, idx) => {
+      const contentLines = sec.lines.filter(l => !SECTION_RE.test(l.trim()));
+      const used = findUsedAliases(contentLines, participants);
+
+      const firstAlias = used.length > 0 ? used[0].alias : participants[0]?.alias || 'A';
+      const lastAlias = used.length > 1 ? used[used.length - 1].alias : firstAlias;
+      const label = `Section ${sec.id}`;
+
+      const out = [...preamble];
+      for (const p of used) out.push(p.line);
+      out.push(`    Note over ${firstAlias},${lastAlias}: Section ${idx + 1} of ${sections.length} — ${label}: ${sec.title}`);
+      out.push(...contentLines);
+      return { partNum: idx + 1, id: sec.id, label, title: sec.title, mmd: out.join('\n') };
+    });
+  }
+
+  function svgToPngBlob(svgString) {
+    return new Promise((resolve, reject) => {
+      const container = document.createElement('div');
+      container.style.position = 'absolute';
+      container.style.left = '-9999px';
+      container.innerHTML = svgString;
+      document.body.appendChild(container);
+      const svgEl = container.querySelector('svg');
+      if (!svgEl) { document.body.removeChild(container); reject(new Error('No SVG')); return; }
+      const xml = new XMLSerializer().serializeToString(svgEl);
+      document.body.removeChild(container);
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth * 2;
+        canvas.height = img.naturalHeight * 2;
+        const ctx = canvas.getContext('2d');
+        ctx.scale(2, 2);
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob(blob => {
+          if (blob) resolve(blob);
+          else reject(new Error('Canvas toBlob failed'));
+        }, 'image/png');
+      };
+      img.onerror = () => reject(new Error('SVG image load failed'));
+      img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(xml)));
+    });
+  }
+
+  let splitRenderCounter = 0;
+
+  $('btnSplitPng').onclick = async () => {
+    const src = cm.getValue().trim();
+    if (!src) { setStatus('Nothing to export', 'err'); return; }
+
+    const parts = splitMermaidBySections(src, getSplitMaxLines());
+    if (!parts || parts.length === 0) {
+      setStatus('No "%% == Section ..." markers found — cannot split', 'err');
+      return;
+    }
+
+    if (typeof JSZip === 'undefined') { setStatus('JSZip not loaded', 'err'); return; }
+
+    const baseName = (currentFileName || 'diagram').replace(/\.(mmd|mermaid)$/i, '');
+    const zip = new JSZip();
+    let failed = 0;
+
+    setStatus(`Rendering 0/${parts.length} parts...`, 'loading');
+
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      setStatus(`Rendering ${i + 1}/${parts.length}: ${p.label}...`, 'loading');
+      try {
+        splitRenderCounter++;
+        const { svg } = await mermaid.render(`split-svg-${splitRenderCounter}`, p.mmd);
+        const blob = await svgToPngBlob(svg);
+        zip.file(`${baseName}_part${p.partNum}_sec${p.ids.join('-')}.png`, blob);
+      } catch (e) {
+        failed++;
+        console.error(`Failed to render part ${p.partNum}:`, e);
+      }
+      zip.file(`${baseName}_part${p.partNum}_sec${p.ids.join('-')}.mmd`, p.mmd);
+    }
+
+    if (failed === parts.length) {
+      setStatus('All section renders failed', 'err');
+      return;
+    }
+
+    setStatus('Creating ZIP...', 'loading');
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(zipBlob);
+    a.download = `${baseName}_sections.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+
+    const msg = failed ? `Exported ${parts.length - failed}/${parts.length} parts (${failed} failed)` : `Exported ${parts.length} section PNGs`;
+    setStatus(msg, failed ? 'err' : 'ok');
+    showToast(msg);
+  };
+
+  $('btnSectionPng').onclick = async () => {
+    const src = cm.getValue().trim();
+    if (!src) { setStatus('Nothing to export', 'err'); return; }
+
+    const parts = splitMermaidPerSection(src);
+    if (!parts || parts.length === 0) {
+      setStatus('No "%% == Section ..." markers found — cannot split', 'err');
+      return;
+    }
+
+    if (typeof JSZip === 'undefined') { setStatus('JSZip not loaded', 'err'); return; }
+
+    const baseName = (currentFileName || 'diagram').replace(/\.(mmd|mermaid)$/i, '');
+    const zip = new JSZip();
+    let failed = 0;
+
+    setStatus(`Rendering 0/${parts.length} sections...`, 'loading');
+
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      setStatus(`Rendering ${i + 1}/${parts.length}: ${p.label}...`, 'loading');
+      try {
+        splitRenderCounter++;
+        const { svg } = await mermaid.render(`split-svg-${splitRenderCounter}`, p.mmd);
+        const blob = await svgToPngBlob(svg);
+        zip.file(`${baseName}_sec${p.id}.png`, blob);
+      } catch (e) {
+        failed++;
+        console.error(`Failed to render section ${p.id}:`, e);
+      }
+      zip.file(`${baseName}_sec${p.id}.mmd`, p.mmd);
+    }
+
+    if (failed === parts.length) {
+      setStatus('All section renders failed', 'err');
+      return;
+    }
+
+    setStatus('Creating ZIP...', 'loading');
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(zipBlob);
+    a.download = `${baseName}_per_section.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+
+    const msg = failed ? `Exported ${parts.length - failed}/${parts.length} sections (${failed} failed)` : `Exported all ${parts.length} sections individually`;
+    setStatus(msg, failed ? 'err' : 'ok');
+    showToast(msg);
+  };
+
+  // --- Share ---
+  const sharePopover = $('sharePopover');
+  const shareUrlInput = $('shareUrlInput');
+
+  async function shareDiagram() {
+    const src = cm.getValue().trim();
+    if (!src) { setStatus('Nothing to share', 'err'); return; }
+
+    const mode = getShareMode();
+    const limit = getShareLimit();
+    const useUrl = mode === 'url' || (mode === 'auto' && src.length <= limit);
+    const base = window.location.origin + window.location.pathname;
+
+    let shareUrl, meta;
+    if (useUrl) {
+      try {
+        const encoded = compressToUrl(src);
+        shareUrl = `${base}#mmd=${encoded}`;
+        meta = `URL encoded (${encoded.length} chars in URL)`;
+      } catch (e) {
+        setStatus('Failed to encode diagram', 'err');
+        return;
+      }
+    } else {
+      try {
+        setStatus('Saving to server...', 'loading');
+        const resp = await fetch('/api/share', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: src }),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        shareUrl = `${base}#id=${data.id}`;
+        meta = `Stored on server (ID: ${data.id})`;
+        setStatus('Shared', 'ok');
+      } catch (e) {
+        setStatus(`Share failed: ${e.message}`, 'err');
+        return;
+      }
+    }
+
+    shareUrlInput.value = shareUrl;
+    $('shareMeta').textContent = meta;
+    const btn = $('btnShare');
+    const btnRect = btn.getBoundingClientRect();
+    sharePopover.style.top = (btnRect.bottom + 6) + 'px';
+    sharePopover.style.left = Math.max(8, btnRect.left - 100) + 'px';
+    sharePopover.classList.add('open');
+
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      showToast('Link copied to clipboard');
+    } catch {
+      shareUrlInput.select();
+    }
+  }
+
+  $('btnShare').onclick = shareDiagram;
+
+  $('btnCopyShare').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(shareUrlInput.value);
+      showToast('Link copied to clipboard');
+    } catch {
+      shareUrlInput.select();
+      document.execCommand('copy');
+      showToast('Link copied');
+    }
+  };
+
+  document.addEventListener('mousedown', (e) => {
+    if (sharePopover.classList.contains('open') && !sharePopover.contains(e.target) && e.target !== $('btnShare')) {
+      sharePopover.classList.remove('open');
+    }
+  });
+
+  // --- Settings ---
+  const settingsModal = $('settingsModal');
+  const cfgShareMode = $('cfgShareMode');
+  const cfgShareLimit = $('cfgShareLimit');
+  const cfgSplitMaxLines = $('cfgSplitMaxLines');
+
+  $('btnSettings').onclick = () => {
+    cfgShareMode.value = getShareMode();
+    cfgShareLimit.value = getShareLimit();
+    cfgSplitMaxLines.value = getSplitMaxLines();
+    settingsModal.classList.add('open');
+  };
+
+  $('btnSettingsCancel').onclick = () => settingsModal.classList.remove('open');
+  settingsModal.onclick = (e) => { if (e.target === settingsModal) settingsModal.classList.remove('open'); };
+
+  $('btnSettingsReset').onclick = () => {
+    cfgShareMode.value = DEFAULT_SHARE_MODE;
+    cfgShareLimit.value = DEFAULT_SHARE_LIMIT;
+    cfgSplitMaxLines.value = DEFAULT_SPLIT_MAX_LINES;
+  };
+
+  $('btnSettingsSave').onclick = () => {
+    localStorage.setItem('mmd-share-mode', cfgShareMode.value);
+    localStorage.setItem('mmd-share-limit', cfgShareLimit.value);
+    const splitMax = parseInt(cfgSplitMaxLines.value, 10);
+    if (splitMax > 0) localStorage.setItem('mmd-split-max-lines', splitMax);
+    else localStorage.removeItem('mmd-split-max-lines');
+    settingsModal.classList.remove('open');
+    showToast('Settings saved');
+  };
+
+  // --- Convert menu ---
+  $('btnConvertPlantUML').onclick = () => {
+    const src = cm.getValue().trim();
+    if (!src) { showToast('Editor is empty'); return; }
+    const converted = DiagramConverters.mermaidToPlantUml(src);
+    DiagramConverters.convertAndNavigate(converted, 'plantuml');
+  };
+
+  $('btnConvertGliffy').onclick = () => {
+    const src = cm.getValue().trim();
+    if (!src) { showToast('Editor is empty'); return; }
+    const converted = DiagramConverters.mermaidToGliffyJson(src);
+    DiagramConverters.convertAndNavigate(converted, 'gliffy');
+  };
+
+  // --- Theme ---
+  $('btnTheme').onclick = () => {
+    document.body.classList.toggle('dark');
+    const isDark = document.body.classList.contains('dark');
+    cm.setOption('theme', isDark ? 'material-darker' : 'default');
+    mermaid.initialize({ startOnLoad: false, theme: isDark ? 'dark' : 'default', securityLevel: 'loose' });
+    localStorage.setItem('mermaid-theme', isDark ? 'dark' : 'light');
+    render();
+  };
+  if (localStorage.getItem('mermaid-theme') === 'dark') {
+    document.body.classList.add('dark');
+    cm.setOption('theme', 'material-darker');
+    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+  }
+
+  // --- Editor toggles ---
+  $('btnWrap').onclick = function() {
+    const w = !cm.getOption('lineWrapping');
+    cm.setOption('lineWrapping', w);
+    this.classList.toggle('active', w);
+  };
+  $('btnNumbers').onclick = function() {
+    const s = !cm.getOption('lineNumbers');
+    cm.setOption('lineNumbers', s);
+    this.classList.toggle('active', s);
+  };
+
+  // --- Resizer ---
+  const resizer = $('resizer');
+  const editorPane = $('editorPane');
+  const previewPane = $('previewPane');
+  let isResizing = false;
+
+  resizer.addEventListener('mousedown', (e) => {
+    isResizing = true; resizer.classList.add('active');
+    document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+    const rect = document.querySelector('.main').getBoundingClientRect();
+    const pct = Math.max(15, Math.min(85, ((e.clientX - rect.left) / (rect.width - resizer.offsetWidth)) * 100));
+    editorPane.style.flex = 'none'; editorPane.style.width = pct + '%';
+    previewPane.style.flex = '1'; cm.refresh();
+  });
+  document.addEventListener('mouseup', () => {
+    if (!isResizing) return;
+    isResizing = false; resizer.classList.remove('active');
+    document.body.style.cursor = ''; document.body.style.userSelect = '';
+  });
+
+  // --- Collapse ---
+  const btnCE = $('btnCollapseEditor'), btnCP = $('btnCollapsePreview');
+  function resetPaneInlineStyles() {
+    editorPane.style.flex = '';
+    editorPane.style.width = '';
+    previewPane.style.flex = '';
+  }
+  function updateCollapse() {
+    const ec = editorPane.classList.contains('collapsed'), pc = previewPane.classList.contains('collapsed');
+    btnCE.innerHTML = pc ? '&#9654; Preview' : '&#9668;';
+    btnCE.title = pc ? 'Restore split view' : 'Collapse editor';
+    btnCE.classList.toggle('restore', pc);
+    if (ec) { btnCP.innerHTML = '&#9664; Editor'; btnCP.title = 'Restore split view'; btnCP.classList.add('restore'); }
+    else { btnCP.innerHTML = '&#9658;'; btnCP.title = 'Collapse preview'; btnCP.classList.remove('restore'); }
+  }
+  btnCE.onclick = () => {
+    if (previewPane.classList.contains('collapsed')) previewPane.classList.remove('collapsed');
+    else { editorPane.classList.add('collapsed'); previewPane.classList.remove('collapsed'); }
+    resetPaneInlineStyles(); updateCollapse(); setTimeout(() => cm.refresh(), 250);
+  };
+  btnCP.onclick = () => {
+    if (editorPane.classList.contains('collapsed')) editorPane.classList.remove('collapsed');
+    else { previewPane.classList.add('collapsed'); editorPane.classList.remove('collapsed'); }
+    resetPaneInlineStyles(); updateCollapse(); setTimeout(() => cm.refresh(), 250);
+  };
+
+  // --- Drag & drop ---
+  document.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    currentFileName = file.name; fileNameEl.textContent = file.name;
+    const reader = new FileReader();
+    reader.onload = (ev) => { cm.setValue(ev.target.result); render(); };
+    reader.readAsText(file);
+  });
+
+  // Initial render on load
+  setTimeout(render, 100);
+
+})();
+</script>
+</body>
+</html>
