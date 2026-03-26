@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    { "source": "/", "destination": "/puml.html" },
+    { "source": "/mermaid", "destination": "/mermaid.html" },
+    { "source": "/gliffy", "destination": "/gliffy.html" },
+    { "source": "/api/(.*)", "destination": "/api/index.js" }
+  ]
+}
