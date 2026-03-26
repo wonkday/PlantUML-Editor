@@ -1,4 +1,4 @@
-export HTTP_PROXY=http://proxy-server:8080
-export HTTPS_PROXY=http://proxy-server:8080
-export NO_PROXY=localhost,127.0.0.1
-bash scripts/restart_editor.sh
+#!/bin/bash
+set -a; source <(tr -d '\r' < .env); set +a
+docker rm -f "${CONTAINER_NAME}" 2>/dev/null
+docker-compose up -d --build
