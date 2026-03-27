@@ -279,3 +279,29 @@
   background: var(--accent, #569cd6);
   color: #fff;
 }
+
+/* Split-marker gutter (breakpoint-style) */
+.split-markers {
+  width: 16px;
+  cursor: pointer;
+}
+.split-marker-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin: 1px 0 0 1px;
+  color: #e06c00;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background .1s;
+}
+.split-marker-icon:hover {
+  background: rgba(224,108,0,.12);
+}
+.split-marker-line {
+  background: rgba(224,108,0,.08) !important;
+}
