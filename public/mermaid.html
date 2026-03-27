@@ -181,6 +181,8 @@
       <hr>
       <button id="btnSplitPng">Split PNGs (ZIP)</button>
       <button id="btnSectionPng">Section PNGs (ZIP)</button>
+      <hr>
+      <button id="btnToggleSplitMarker" title="Insert/remove a split point at the cursor line (for Section PNGs)">&#9986; Toggle Split Marker</button>
     </div>
   </div>
   <div class="dropdown" id="menuConvert">
@@ -274,6 +276,10 @@
     <label for="cfgSplitMaxLines">Max lines per split group</label>
     <input type="number" id="cfgSplitMaxLines" min="10" max="500" step="10">
     <div class="hint">Controls height of each PNG in "Split PNGs" export</div>
+    <label style="display:flex; align-items:center; gap:6px; margin-top:4px; cursor:pointer;">
+      <input type="checkbox" id="cfgSplitLabel" checked> Show part label note on split diagrams
+    </label>
+    <div class="hint">When enabled, each split image includes a "Part X of Y — Section ..." note at the top.</div>
     <div class="modal-actions">
       <button id="btnSettingsCancel">Cancel</button>
       <button id="btnSettingsReset">Reset Defaults</button>
@@ -420,9 +426,65 @@
     lineNumbers: true, matchBrackets: true, autoCloseBrackets: true,
     tabSize: 2, indentWithTabs: false, lineWrapping: false, theme: 'default',
     foldGutter: { rangeFinder: mermaidFoldFinder },
-    gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+    gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter', 'split-markers'],
     extraKeys: { 'Ctrl-Q': function(cm) { cm.foldCode(cm.getCursor(), mermaidFoldFinder); } },
   });
+
+  // --- Split markers (breakpoint-style gutter) ---
+  const MMD_SPLIT_RE = /^%%\s*@split/i;
+
+  function makeSplitIcon() {
+    const el = document.createElement('div');
+    el.className = 'split-marker-icon';
+    el.textContent = '\u2702';
+    el.title = 'Split point (click to remove)';
+    return el;
+  }
+
+  function updateSplitMarkers() {
+    cm.clearGutter('split-markers');
+    cm.eachLine(function(lineHandle) {
+      if (MMD_SPLIT_RE.test(lineHandle.text.trim())) {
+        cm.setGutterMarker(lineHandle, 'split-markers', makeSplitIcon());
+        cm.addLineClass(lineHandle, 'background', 'split-marker-line');
+      } else {
+        cm.removeLineClass(lineHandle, 'background', 'split-marker-line');
+      }
+    });
+  }
+
+  function toggleSplitMarker(lineNum) {
+    const nextLine = lineNum + 1;
+    if (nextLine < cm.lineCount()) {
+      const nextText = cm.getLine(nextLine).trim();
+      if (MMD_SPLIT_RE.test(nextText)) {
+        cm.replaceRange('', { line: nextLine, ch: 0 }, { line: nextLine + 1, ch: 0 });
+        updateSplitMarkers();
+        return;
+      }
+    }
+    const currentText = cm.getLine(lineNum).trim();
+    if (MMD_SPLIT_RE.test(currentText)) {
+      cm.replaceRange('', { line: lineNum, ch: 0 }, { line: lineNum + 1, ch: 0 });
+      updateSplitMarkers();
+      return;
+    }
+    const indent = cm.getLine(lineNum).match(/^(\s*)/)[1];
+    cm.replaceRange(indent + '%% @split\n', { line: nextLine, ch: 0 });
+    updateSplitMarkers();
+  }
+
+  cm.on('gutterClick', function(cm, line, gutter) {
+    if (gutter === 'split-markers') toggleSplitMarker(line);
+  });
+
+  cm.on('changes', function() { updateSplitMarkers(); });
+
+  $('btnToggleSplitMarker').onclick = () => {
+    const line = cm.getCursor().line;
+    toggleSplitMarker(line);
+    cm.focus();
+  };
 
   const SAMPLE = `sequenceDiagram
     participant Alice
@@ -796,6 +858,7 @@
   // --- Split & Export PNGs ---
   const DEFAULT_SPLIT_MAX_LINES = 80;
   function getSplitMaxLines() { return parseInt(localStorage.getItem('mmd-split-max-lines'), 10) || DEFAULT_SPLIT_MAX_LINES; }
+  function getSplitLabel() { const v = localStorage.getItem('mmd-split-label'); return v === null ? true : v === '1'; }
 
   const SECTION_RE = /^%%\s*==\s*Section\s+/i;
   const MMD_PARTICIPANT_RE = /^\s*participant\s+(\S+)/i;
@@ -900,7 +963,9 @@
 
       const out = [...preamble];
       for (const p of used) out.push(p.line);
-      out.push(`    Note over ${firstAlias},${lastAlias}: Part ${idx + 1} of ${groups.length} — ${label}: ${titles}`);
+      if (getSplitLabel()) {
+        out.push(`    Note over ${firstAlias},${lastAlias}: Part ${idx + 1} of ${groups.length} — ${label}: ${titles}`);
+      }
       for (let i = 0; i < group.length; i++) {
         out.push(...group[i].lines.filter(l => !SECTION_RE.test(l.trim())));
       }
@@ -954,20 +1019,72 @@
       while (s.lines.length && /^\s*$/.test(s.lines[s.lines.length - 1])) s.lines.pop();
     }
 
-    return sections.map((sec, idx) => {
+    const SPLIT_MARKER_RE = /^%%\s*@split/i;
+    const MMD_BLOCK_START = /^\s*(alt|opt|loop|par|critical|break|rect)\b/i;
+    const MMD_BLOCK_END = /^\s*end\b/i;
+    const allParts = [];
+    let partCounter = 0;
+
+    function balanceChunk(lines) {
+      let depth = 0;
+      const prefix = [];
+      const suffix = [];
+      const firstContent = lines.find(l => l.trim());
+      const startsWithElse = firstContent && /^else\b/i.test(firstContent.trim());
+      for (const l of lines) {
+        const t = l.trim();
+        if (MMD_BLOCK_END.test(t)) depth--;
+        if (MMD_BLOCK_START.test(t)) depth++;
+      }
+      if (startsWithElse) {
+        prefix.push('    alt continued');
+        depth++;
+      }
+      while (depth > 0) { suffix.push('    end'); depth--; }
+      while (depth < 0) { prefix.push('    rect rgb(200,200,200)'); depth++; }
+      return [...prefix, ...lines, ...suffix];
+    }
+
+    for (let sIdx = 0; sIdx < sections.length; sIdx++) {
+      const sec = sections[sIdx];
       const contentLines = sec.lines.filter(l => !SECTION_RE.test(l.trim()));
-      const used = findUsedAliases(contentLines, participants);
+      const chunks = [[]];
+      for (const line of contentLines) {
+        if (SPLIT_MARKER_RE.test(line.trim())) {
+          chunks.push([]);
+        } else {
+          chunks[chunks.length - 1].push(line);
+        }
+      }
+      const hasContent = l => {
+        const t = l.trim();
+        return t && !MMD_BLOCK_END.test(t);
+      };
+      const nonEmpty = chunks.filter(c => c.some(hasContent));
+      const subParts = nonEmpty.length > 0 ? nonEmpty : [contentLines.filter(l => !SPLIT_MARKER_RE.test(l.trim()))];
 
-      const firstAlias = used.length > 0 ? used[0].alias : participants[0]?.alias || 'A';
-      const lastAlias = used.length > 1 ? used[used.length - 1].alias : firstAlias;
-      const label = `Section ${sec.id}`;
+      for (let cIdx = 0; cIdx < subParts.length; cIdx++) {
+        partCounter++;
+        const rawChunk = subParts[cIdx];
+        const chunk = balanceChunk(rawChunk);
+        const used = findUsedAliases(chunk, participants);
+        const effectiveUsed = used.length > 0 ? used : participants;
 
-      const out = [...preamble];
-      for (const p of used) out.push(p.line);
-      out.push(`    Note over ${firstAlias},${lastAlias}: Section ${idx + 1} of ${sections.length} — ${label}: ${sec.title}`);
-      out.push(...contentLines);
-      return { partNum: idx + 1, id: sec.id, label, title: sec.title, mmd: out.join('\n') };
-    });
+        const firstAlias = effectiveUsed.length > 0 ? effectiveUsed[0].alias : 'A';
+        const lastAlias = effectiveUsed.length > 1 ? effectiveUsed[effectiveUsed.length - 1].alias : firstAlias;
+        const subLabel = subParts.length > 1 ? String.fromCharCode(97 + cIdx) : '';
+        const label = `Section ${sec.id}${subLabel}`;
+
+        const out = [...preamble];
+        for (const p of effectiveUsed) out.push(p.line);
+        if (getSplitLabel()) {
+          out.push(`    Note over ${firstAlias},${lastAlias}: ${label} — ${sec.title}${subLabel ? ' (part ' + (cIdx + 1) + '/' + subParts.length + ')' : ''}`);
+        }
+        out.push(...chunk);
+        allParts.push({ partNum: partCounter, id: sec.id + subLabel, label, title: sec.title, mmd: out.join('\n') });
+      }
+    }
+    return allParts;
   }
 
   function svgToPngBlob(svgString) {
@@ -1188,11 +1305,13 @@
   const cfgShareMode = $('cfgShareMode');
   const cfgShareLimit = $('cfgShareLimit');
   const cfgSplitMaxLines = $('cfgSplitMaxLines');
+  const cfgSplitLabel = $('cfgSplitLabel');
 
   $('btnSettings').onclick = () => {
     cfgShareMode.value = getShareMode();
     cfgShareLimit.value = getShareLimit();
     cfgSplitMaxLines.value = getSplitMaxLines();
+    cfgSplitLabel.checked = getSplitLabel();
     settingsModal.classList.add('open');
   };
 
@@ -1203,6 +1322,7 @@
     cfgShareMode.value = DEFAULT_SHARE_MODE;
     cfgShareLimit.value = DEFAULT_SHARE_LIMIT;
     cfgSplitMaxLines.value = DEFAULT_SPLIT_MAX_LINES;
+    cfgSplitLabel.checked = true;
   };
 
   $('btnSettingsSave').onclick = () => {
@@ -1211,6 +1331,7 @@
     const splitMax = parseInt(cfgSplitMaxLines.value, 10);
     if (splitMax > 0) localStorage.setItem('mmd-split-max-lines', splitMax);
     else localStorage.removeItem('mmd-split-max-lines');
+    localStorage.setItem('mmd-split-label', cfgSplitLabel.checked ? '1' : '0');
     settingsModal.classList.remove('open');
     showToast('Settings saved');
   };
