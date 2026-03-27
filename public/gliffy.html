@@ -221,6 +221,8 @@
       <hr>
       <button id="btnSplitPng">Split PNGs (ZIP)</button>
       <button id="btnSectionPng">Section PNGs (ZIP)</button>
+      <hr>
+      <button id="btnToggleSplitMarker" disabled title="Split markers are not supported in JSON. Convert to PlantUML or Mermaid for fine-grained split control.">&#9986; Toggle Split Marker</button>
     </div>
   </div>
   <div class="dropdown" id="menuConvert">
@@ -322,6 +324,10 @@
     <label for="cfgSplitMaxMessages">Max messages per split group</label>
     <input type="number" id="cfgSplitMaxMessages" min="5" max="200" step="5">
     <div class="hint">Controls how many messages per PNG in "Split PNGs" export</div>
+    <label style="display:flex; align-items:center; gap:6px; margin-top:4px; cursor:pointer;">
+      <input type="checkbox" id="cfgSplitLabel" checked> Show part label note on split diagrams
+    </label>
+    <div class="hint">When enabled, each split image includes a "Part X of Y — Section ..." note at the top.</div>
     <div class="modal-actions">
       <button id="btnSettingsCancel">Cancel</button>
       <button id="btnSettingsReset">Reset Defaults</button>
@@ -885,6 +891,7 @@
   // --- Split & Export PNGs ---
   const DEFAULT_SPLIT_MAX_MESSAGES = 20;
   function getSplitMaxMessages() { return parseInt(localStorage.getItem('gliffy-split-max-messages'), 10) || DEFAULT_SPLIT_MAX_MESSAGES; }
+  function getSplitLabel() { const v = localStorage.getItem('gliffy-split-label'); return v === null ? true : v === '1'; }
 
   function parseGliffySections(jsonStr) {
     let doc;
@@ -985,9 +992,18 @@
 
   let splitRenderCounter = 0;
 
-  async function renderGliffyToSvg(gliffyJsonStr) {
-    const mermaidCode = DiagramConverters.gliffyJsonToMermaid(gliffyJsonStr);
+  async function renderGliffyToSvg(gliffyJsonStr, labelNote) {
+    let mermaidCode = DiagramConverters.gliffyJsonToMermaid(gliffyJsonStr);
     if (!mermaidCode || mermaidCode.trim() === 'sequenceDiagram') return null;
+    if (labelNote) {
+      const mmdLines = mermaidCode.split(/\r?\n/);
+      const pRe = /^\s*participant\s+(\S+)/i;
+      let lastP = -1;
+      for (let i = 0; i < mmdLines.length; i++) { if (pRe.test(mmdLines[i])) lastP = i; }
+      const insertAt = lastP >= 0 ? lastP + 1 : 1;
+      mmdLines.splice(insertAt, 0, `    ${labelNote}`);
+      mermaidCode = mmdLines.join('\n');
+    }
     splitRenderCounter++;
     const { svg } = await mermaid.render(`split-gliffy-${splitRenderCounter}`, mermaidCode);
     return svg;
@@ -1009,13 +1025,15 @@
     const zip = new JSZip();
     let failed = 0;
 
+    const showLabel = getSplitLabel();
     setStatus(`Rendering 0/${parts.length} parts...`, 'loading');
 
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i];
       setStatus(`Rendering ${i + 1}/${parts.length}: ${p.label}...`, 'loading');
+      const labelNote = showLabel ? `Note over A: Part ${p.partNum} of ${parts.length} — ${p.label}: ${p.titles}` : null;
       try {
-        const svg = await renderGliffyToSvg(p.gliffy);
+        const svg = await renderGliffyToSvg(p.gliffy, labelNote);
         if (!svg) throw new Error('No diagram content');
         const blob = await svgToPngBlob(svg);
         zip.file(`${baseName}_part${p.partNum}_sec${p.ids.join('-')}.png`, blob);
@@ -1060,13 +1078,15 @@
     const zip = new JSZip();
     let failed = 0;
 
+    const showLabel = getSplitLabel();
     setStatus(`Rendering 0/${parts.length} sections...`, 'loading');
 
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i];
       setStatus(`Rendering ${i + 1}/${parts.length}: ${p.label}...`, 'loading');
+      const labelNote = showLabel ? `Note over A: Section ${i + 1} of ${parts.length} — ${p.label}: ${p.title}` : null;
       try {
-        const svg = await renderGliffyToSvg(p.gliffy);
+        const svg = await renderGliffyToSvg(p.gliffy, labelNote);
         if (!svg) throw new Error('No diagram content');
         const blob = await svgToPngBlob(svg);
         zip.file(`${baseName}_sec${p.id}.png`, blob);
@@ -1210,10 +1230,12 @@
   // --- Settings ---
   const settingsModal = $('settingsModal');
   const cfgSplitMaxMessages = $('cfgSplitMaxMessages');
+  const cfgSplitLabel = $('cfgSplitLabel');
   $('btnSettings').onclick = () => {
     $('cfgShareMode').value = getShareMode();
     $('cfgShareLimit').value = getShareLimit();
     cfgSplitMaxMessages.value = getSplitMaxMessages();
+    cfgSplitLabel.checked = getSplitLabel();
     settingsModal.classList.add('open');
   };
   $('btnSettingsCancel').onclick = () => settingsModal.classList.remove('open');
@@ -1222,6 +1244,7 @@
     $('cfgShareMode').value = DEFAULT_SHARE_MODE;
     $('cfgShareLimit').value = DEFAULT_SHARE_LIMIT;
     cfgSplitMaxMessages.value = DEFAULT_SPLIT_MAX_MESSAGES;
+    cfgSplitLabel.checked = true;
   };
   $('btnSettingsSave').onclick = () => {
     localStorage.setItem('gliffy-share-mode', $('cfgShareMode').value);
@@ -1229,6 +1252,7 @@
     const splitMax = parseInt(cfgSplitMaxMessages.value, 10);
     if (splitMax > 0) localStorage.setItem('gliffy-split-max-messages', splitMax);
     else localStorage.removeItem('gliffy-split-max-messages');
+    localStorage.setItem('gliffy-split-label', cfgSplitLabel.checked ? '1' : '0');
     settingsModal.classList.remove('open');
     showToast('Settings saved');
   };
