@@ -15,10 +15,16 @@ try {
 app.use(express.json({ limit: '2mb' }));
 app.use(express.text({ limit: '2mb' }));
 
+app.get('/api/config', (req, res) => {
+  res.json({
+    krokiUrl: process.env.KROKI_URL || '',
+  });
+});
+
 if (storage) {
   app.use(createShareRouter(storage));
 } else {
-  app.all('*', (req, res) => {
+  app.use('/api/share', (req, res) => {
     res.status(503).json({ error: 'Storage unavailable. Configure UPSTASH_REDIS_REST_URL for Vercel deployments.' });
   });
 }
