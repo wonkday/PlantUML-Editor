@@ -215,20 +215,42 @@ window.DiagramConverters = (function () {
     const participants = [];
     const messages = [];
     const notes = [];
-    const idMap = {};
+    const fragments = [];
+    const sectionLabels = [];
+    const activations = [];
 
     for (const obj of objects) {
       if (!obj || obj.hidden) continue;
-      idMap[obj.id] = obj;
       const uid = (obj.uid || '').toLowerCase();
       const gType = obj.graphic && obj.graphic.type;
       const text = extractText(obj);
 
-      if (uid.includes('uml') && uid.includes('sequence') && uid.includes('lifeline')) {
+      if (uid.includes('lifeline_dash') || uid.includes('section_line') || uid.includes('fragment_separator')) continue;
+      if (uid.includes('activation')) { activations.push({ x: obj.x, y: obj.y, h: obj.height }); continue; }
+      if (uid.includes('combined_fragment')) { fragments.push({ y: obj.y, h: obj.height, endY: obj.y + obj.height }); continue; }
+      if (uid.includes('fragment_label')) {
+        const last = fragments[fragments.length - 1];
+        if (last && Math.abs(last.y - obj.y) < 5) last.kind = (text || 'alt').toLowerCase();
+        continue;
+      }
+      if (uid.includes('fragment_condition')) {
+        const nearFrag = fragments.filter(f => obj.y >= f.y && obj.y <= f.endY).pop();
+        if (nearFrag) {
+          if (!nearFrag.conditions) nearFrag.conditions = [];
+          nearFrag.conditions.push({ y: obj.y, label: (text || '').replace(/^\[|\]$/g, '') });
+        }
+        continue;
+      }
+      if (uid.includes('section_label')) { sectionLabels.push({ y: obj.y, title: text }); continue; }
+
+      if (uid.includes('lifeline') && gType === 'Shape') {
         participants.push({ id: obj.id, name: text || `P${obj.id}`, x: obj.x });
-      } else if (uid.includes('uml') && uid.includes('sequence') && uid.includes('actor')) {
+      } else if (uid.includes('actor') && gType === 'Shape') {
         participants.push({ id: obj.id, name: text || `Actor${obj.id}`, x: obj.x, isActor: true });
-      } else       if (gType === 'Line') {
+      } else if (uid.includes('note') && gType === 'Shape') {
+        const pos = (participants.length > 0 && obj.x > participants[0].x + 60) ? 'right' : 'left';
+        notes.push({ text, y: obj.y, x: obj.x, position: pos, target: null });
+      } else if (uid.includes('message') && gType === 'Line') {
         const line = obj.graphic.Line;
         const constraints = obj.constraints || {};
         let startNode = constraints.startConstraint &&
@@ -239,14 +261,15 @@ window.DiagramConverters = (function () {
           constraints.endConstraint.EndPositionConstraint.nodeId;
         const label = extractText(obj);
         const isDashed = line && line.dashStyle && line.dashStyle !== null;
+        const isAsync = line && line.endArrow === 6;
         const cp = (line && line.controlPath) || [];
         const lineStartX = obj.x + (cp[0] ? cp[0][0] : 0);
-        const lineEndX = obj.x + (cp[1] ? cp[1][0] : 0);
-        messages.push({ objId: obj.id, from: startNode, to: endNode, label, y: obj.y, isDashed, lineStartX, lineEndX });
-      } else if (uid.includes('note')) {
-        notes.push({ text, y: obj.y, x: obj.x });
-      } else if (uid.includes('rectangle') || uid.includes('basic')) {
-        if (text && !uid.includes('line') && !uid.includes('arrow')) {
+        const lineEndX = obj.x + (cp.length > 0 ? cp[cp.length - 1][0] : 0);
+        messages.push({ objId: obj.id, from: startNode, to: endNode, label, y: obj.y, isDashed, isAsync, lineStartX, lineEndX });
+      } else if (gType === 'Line') {
+        continue;
+      } else if ((uid.includes('rectangle') || uid.includes('basic')) && gType === 'Shape') {
+        if (text && !uid.includes('line') && !uid.includes('arrow') && !uid.includes('fragment') && !uid.includes('section')) {
           participants.push({ id: obj.id, name: text, x: obj.x });
         }
       }
@@ -254,6 +277,8 @@ window.DiagramConverters = (function () {
 
     participants.sort((a, b) => a.x - b.x);
     messages.sort((a, b) => a.y - b.y);
+    sectionLabels.sort((a, b) => a.y - b.y);
+    fragments.sort((a, b) => a.y - b.y);
 
     function findNearestParticipant(xPos) {
       let best = null, bestDist = Infinity;
@@ -267,36 +292,49 @@ window.DiagramConverters = (function () {
 
     const out = ['@startuml'];
     const aliasMap = {};
+    const pCenterByAlias = {};
 
     for (const p of participants) {
       const alias = p.name.replace(/[^a-zA-Z0-9_]/g, '') || `P${p.id}`;
       aliasMap[p.id] = alias;
-      const keyword = p.isActor ? 'actor' : 'participant';
+      pCenterByAlias[alias] = p.x + 60;
+      const keyword = p.isActor ? 'actor' : (p.name.toLowerCase().includes('db') ? 'database' : 'participant');
       if (alias !== p.name) {
         out.push(`${keyword} "${p.name}" as ${alias}`);
       } else {
         out.push(`${keyword} ${alias}`);
       }
     }
-
     out.push('');
 
     const sectionDefs = data.sections || [];
     const sectionByObjId = {};
     for (const sec of sectionDefs) {
-      for (const oid of (sec.objectIds || [])) {
-        sectionByObjId[oid] = sec;
-      }
+      for (const oid of (sec.objectIds || [])) sectionByObjId[oid] = sec;
     }
+
+    const timeline = [];
     let currentSecId = null;
 
-    for (const msg of messages) {
-      const sec = sectionByObjId[msg.objId];
-      if (sec && sec.id !== currentSecId) {
-        currentSecId = sec.id;
-        const marker = sec.title ? `Section ${sec.id}: ${sec.title}` : `Section ${sec.id}`;
-        out.push(`== ${marker} ==`);
+    for (const sl of sectionLabels) {
+      timeline.push({ y: sl.y, type: 'section', title: sl.title });
+    }
+
+    for (const frag of fragments) {
+      timeline.push({ y: frag.y, type: 'fragment_start', kind: frag.kind || 'alt', label: '' });
+      if (frag.conditions) {
+        const sorted = frag.conditions.slice().sort((a, b) => a.y - b.y);
+        if (sorted.length > 0) {
+          timeline[timeline.length - 1].label = sorted[0].label;
+          for (let i = 1; i < sorted.length; i++) {
+            timeline.push({ y: sorted[i].y, type: 'fragment_else', label: sorted[i].label });
+          }
+        }
       }
+      timeline.push({ y: frag.endY, type: 'fragment_end' });
+    }
+
+    for (const msg of messages) {
       let fromAlias = aliasMap[msg.from];
       let toAlias = aliasMap[msg.to];
       if (!fromAlias && msg.lineStartX != null) {
@@ -308,14 +346,76 @@ window.DiagramConverters = (function () {
         if (p) toAlias = aliasMap[p.id];
       }
       if (!fromAlias || !toAlias) continue;
-      const arrow = msg.isDashed ? '-->' : '->';
-      out.push(`${fromAlias} ${arrow} ${toAlias} : ${msg.label || ''}`);
+      const arrow = msg.isDashed ? '-->' : (msg.isAsync ? '->>' : '->');
+      timeline.push({ y: msg.y, type: 'message', text: `${fromAlias} ${arrow} ${toAlias} : ${msg.label || ''}`, objId: msg.objId });
     }
 
-    if (notes.length > 0) {
-      out.push('');
-      for (const n of notes) {
-        if (n.text) out.push(`note right : ${n.text}`);
+    for (const n of notes) {
+      if (!n.text) continue;
+      let targetAlias = null;
+      if (n.x != null) {
+        const p = findNearestParticipant(n.x);
+        if (p) targetAlias = aliasMap[p.id];
+      }
+      const pos = n.position || 'right';
+      timeline.push({ y: n.y, type: 'note', text: n.text, position: pos, target: targetAlias });
+    }
+
+    for (const act of activations) {
+      const p = findNearestParticipant(act.x + 5);
+      if (p) {
+        const alias = aliasMap[p.id];
+        timeline.push({ y: act.y, type: 'activate', alias });
+        timeline.push({ y: act.y + act.h, type: 'deactivate', alias });
+      }
+    }
+
+    timeline.sort((a, b) => {
+      if (a.y !== b.y) return a.y - b.y;
+      const order = { section: 0, fragment_start: 1, activate: 2, message: 3, note: 4, deactivate: 5, fragment_else: 6, fragment_end: 7 };
+      return (order[a.type] || 3) - (order[b.type] || 3);
+    });
+
+    for (const item of timeline) {
+      switch (item.type) {
+        case 'section': {
+          const sec = sectionByObjId[item.objId];
+          if (sec && sec.id !== currentSecId) {
+            currentSecId = sec.id;
+            out.push(`== Section ${sec.id}: ${sec.title} ==`);
+          } else {
+            out.push(`== ${item.title} ==`);
+          }
+          break;
+        }
+        case 'fragment_start': out.push(`${item.kind} ${item.label}`); break;
+        case 'fragment_else': out.push(`else ${item.label}`); break;
+        case 'fragment_end': out.push('end'); break;
+        case 'activate': out.push(`activate ${item.alias}`); break;
+        case 'deactivate': out.push(`deactivate ${item.alias}`); break;
+        case 'message': {
+          if (sectionLabels.length === 0) {
+            const sec = sectionByObjId[item.objId];
+            if (sec && sec.id !== currentSecId) {
+              currentSecId = sec.id;
+              const marker = sec.title ? `Section ${sec.id}: ${sec.title}` : `Section ${sec.id}`;
+              out.push(`== ${marker} ==`);
+            }
+          }
+          out.push(item.text);
+          break;
+        }
+        case 'note': {
+          const target = item.target ? `${item.position} of ${item.target}` : 'right';
+          if (item.text.includes('\n')) {
+            out.push(`note ${target}`);
+            for (const line of item.text.split('\n')) out.push(`  ${line}`);
+            out.push('end note');
+          } else {
+            out.push(`note ${target} : ${item.text}`);
+          }
+          break;
+        }
       }
     }
 
@@ -334,200 +434,372 @@ window.DiagramConverters = (function () {
   // PlantUML -> Gliffy JSON
   // =========================================================================
   function plantumlToGliffyJson(puml) {
-    const lines = puml.split('\n');
-    const participants = [];
-    const messages = [];
-    let inSkinparamBlock = false;
-    let inNote = false;
-    const sections = [];
-    let currentSection = null;
-
-    for (const line of lines) {
-      const l = line.trim();
-      if (!l || /^@start|^@end|^title\b/i.test(l)) continue;
-      if (/^skinparam\b/i.test(l)) {
-        if (l.includes('{')) inSkinparamBlock = true;
-        continue;
-      }
-      if (inSkinparamBlock) {
-        if (l.includes('}')) inSkinparamBlock = false;
-        continue;
-      }
-      if (/^\|\|\|$/.test(l)) continue;
-      const secMatch = l.match(/^==\s*(.+?)\s*==\s*$/);
-      if (secMatch) {
-        if (currentSection) sections.push(currentSection);
-        const sm = secMatch[1].match(/^Section\s+([\w]+)[:\s]*(.*)/i);
-        currentSection = {
-          id: sm ? sm[1] : String(sections.length + 1),
-          title: sm ? sm[2].trim() : secMatch[1],
-          objectIds: [],
-        };
-        continue;
-      }
-      if (/^end\s*note/i.test(l)) { inNote = false; continue; }
-      if (inNote) continue;
-      if (/^note\b/i.test(l)) {
-        if (!l.includes(':')) inNote = true;
-        continue;
-      }
-      if (/^(activate|deactivate|alt|else|opt|loop|end|group|critical|break|par)\b/i.test(l)) continue;
-
-      const pMatch = l.match(/^(participant|actor|database)\s+"([^"]+)"\s+as\s+(\S+)/i);
-      if (pMatch) {
-        const alias = pMatch[3].replace(/#[0-9A-Fa-f]+$/, '');
-        participants.push({ type: pMatch[1].toLowerCase(), label: pMatch[2], alias });
-        continue;
-      }
-      const pSimple = l.match(/^(participant|actor|database)\s+(\S+)/i);
-      if (pSimple) {
-        const alias = pSimple[2].replace(/#[0-9A-Fa-f]+$/, '');
-        participants.push({ type: pSimple[1].toLowerCase(), label: alias, alias });
-        continue;
-      }
-
-      const arrowMatch = l.match(/^(\S+)\s*(--?>?>?|->>)\s*(\S+)\s*:\s*(.*)$/);
-      if (arrowMatch) {
-        const msgIdx = messages.length;
-        messages.push({
-          from: arrowMatch[1],
-          to: arrowMatch[3],
-          label: arrowMatch[4],
-          isDashed: arrowMatch[2].startsWith('--'),
-        });
-        if (currentSection) currentSection.objectIds.push(msgIdx);
-      }
-    }
-    if (currentSection) sections.push(currentSection);
-
+    // ---- Constants ----
     const SPACING_X = 180;
-    const SPACING_Y = 60;
-    const HEADER_H = 40;
-    const LIFELINE_TOP = 80;
     const BOX_W = 120;
+    const HEADER_Y = 20;
+    const HEADER_H = 40;
+    const LIFELINE_TOP = HEADER_Y + HEADER_H + 15;
+    const MSG_SPACING = 50;
+    const SELF_MSG_W = 60;
+    const SELF_MSG_H = 30;
+    const ACT_BAR_W = 10;
+    const SECTION_H = 26;
+    const SECTION_GAP = 10;
+    const FRAG_LABEL_H = 22;
+    const FRAG_PAD = 8;
+    const NOTE_H = 40;
+    const NOTE_W = 160;
+    const MARGIN_LEFT = 40;
+    const LAYER_ID = 'layer0';
+
     let nextId = 0;
-    const layerId = 'layer0';
-    const objects = [];
-    const aliasToIdx = {};
-    const aliasToId = {};
+    function newId() { return nextId++; }
 
-    for (let i = 0; i < participants.length; i++) {
-      const p = participants[i];
-      const pId = nextId++;
-      aliasToIdx[p.alias] = i;
-      aliasToId[p.alias] = pId;
-      const x = 40 + i * SPACING_X;
+    function escHtml(t) {
+      return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;').replace(/\\n/g, '<br/>');
+    }
 
-      objects.push({
-        x, y: 20, rotation: 0, id: pId,
-        uid: 'com.gliffy.shape.uml.uml_v2.sequence.lifeline',
-        width: BOX_W, height: HEADER_H, lockAspectRatio: false, lockShape: false,
-        order: objects.length, hidden: false,
+    function mkText(text, w, fontSize, opts) {
+      return {
+        x: (opts && opts.x) || 2, y: (opts && opts.y) || 0,
+        rotation: 0, id: newId(), uid: null,
+        width: w, height: (opts && opts.h) || 14,
+        lockAspectRatio: false, lockShape: false, order: 'auto', hidden: false,
+        graphic: {
+          type: 'Text',
+          Text: {
+            tid: null, valign: (opts && opts.valign) || 'middle',
+            overflow: 'both', vposition: 'none', hposition: 'none',
+            html: `<p style="text-align:${(opts && opts.align) || 'center'};"><span style="font-size:${fontSize}px;${(opts && opts.bold) ? 'font-weight:bold;' : ''}">${escHtml(text)}</span></p>`,
+            paddingLeft: 0, paddingRight: 0, paddingBottom: 2, paddingTop: 2,
+            outerPaddingLeft: 6, outerPaddingRight: 6, outerPaddingBottom: 2, outerPaddingTop: 6,
+          },
+        },
+        children: null, layerId: LAYER_ID,
+      };
+    }
+
+    function mkRect(x, y, w, h, uid, fill, stroke, sWidth, children) {
+      return {
+        x, y, rotation: 0, id: newId(), uid,
+        width: w, height: h, lockAspectRatio: false, lockShape: false,
+        order: 0, hidden: false,
         graphic: {
           type: 'Shape',
           Shape: {
             tid: 'com.gliffy.stencil.rectangle.basic_v1',
-            strokeWidth: 2, strokeColor: '#333333', fillColor: '#E3F2FD',
+            strokeWidth: sWidth, strokeColor: stroke, fillColor: fill,
             gradient: false, dropShadow: false, state: 0, opacity: 1,
           },
         },
-        children: [{
-          x: 2, y: 0, rotation: 0, id: nextId++, uid: null,
-          width: 116, height: 14, lockAspectRatio: false, lockShape: false,
-          order: 'auto', hidden: false,
-          graphic: {
-            type: 'Text',
-            Text: {
-              tid: null, valign: 'middle', overflow: 'none', vposition: 'none', hposition: 'none',
-              html: `<p style="text-align:center;"><span style="font-size:12px;">${p.label}</span></p>`,
-              paddingLeft: 0, paddingRight: 0, paddingBottom: 8, paddingTop: 8,
-              outerPaddingLeft: 6, outerPaddingRight: 6, outerPaddingBottom: 2, outerPaddingTop: 6,
-            },
-          },
-          children: null, layerId,
-        }],
-        layerId, linkMap: [],
-      });
+        children: children || null, layerId: LAYER_ID, linkMap: [],
+      };
     }
 
-    const msgIdxToObjId = {};
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      const fromIdx = aliasToIdx[msg.from];
-      const toIdx = aliasToIdx[msg.to];
-      if (fromIdx === undefined || toIdx === undefined) continue;
-
-      const fromId = aliasToId[msg.from];
-      const toId = aliasToId[msg.to];
-      const halfBox = BOX_W / 2;
-      const fromX = 40 + fromIdx * SPACING_X + halfBox;
-      const toX = 40 + toIdx * SPACING_X + halfBox;
-      const y = LIFELINE_TOP + i * SPACING_Y;
-      const lineW = Math.abs(toX - fromX) || 80;
-      const goesRight = toX >= fromX;
-      const lineObjId = nextId++;
-      msgIdxToObjId[i] = lineObjId;
-
-      const lineObj = {
-        x: Math.min(fromX, toX), y, rotation: 0, id: lineObjId,
-        uid: 'com.gliffy.shape.uml.uml_v2.sequence.message',
-        width: lineW, height: 1,
-        lockAspectRatio: false, lockShape: false,
-        order: objects.length, hidden: false,
+    function mkLine(x, y, w, h, cp, uid, opts) {
+      return {
+        x, y, rotation: 0, id: newId(), uid,
+        width: w, height: h, lockAspectRatio: false, lockShape: false,
+        order: 0, hidden: false,
         graphic: {
           type: 'Line',
           Line: {
-            strokeWidth: 1, strokeColor: '#000000', fillColor: 'none',
-            dashStyle: msg.isDashed ? [4, 4] : null,
-            startArrow: 0, endArrow: 2,
+            strokeWidth: (opts && opts.sw) || 1,
+            strokeColor: (opts && opts.sc) || '#000000',
+            fillColor: 'none',
+            dashStyle: (opts && opts.dash) || null,
+            startArrow: 0, endArrow: (opts && opts.endArrow) || 0,
             startArrowRotation: 'auto', endArrowRotation: 'auto',
-            ortho: false, interpolationType: 'linear', cornerRadius: null,
-            controlPath: goesRight ? [[0, 0], [lineW, 0]] : [[lineW, 0], [0, 0]],
-            lockSegments: {},
+            ortho: !!(opts && opts.ortho),
+            interpolationType: 'linear',
+            cornerRadius: (opts && opts.corner) || null,
+            controlPath: cp, lockSegments: {},
           },
         },
-        constraints: {
-          startConstraint: {
-            type: 'StartPositionConstraint',
-            StartPositionConstraint: {
-              nodeId: fromId, px: 0.5, py: 0.5,
-            },
-          },
-          endConstraint: {
-            type: 'EndPositionConstraint',
-            EndPositionConstraint: {
-              nodeId: toId, px: 0.5, py: 0.5,
-            },
-          },
-        },
-        children: msg.label ? [{
-          x: 0, y: 0, rotation: 0, id: nextId++, uid: null,
-          width: 100, height: 14, lockAspectRatio: false, lockShape: false,
-          order: 'auto', hidden: false,
-          graphic: {
-            type: 'Text',
-            Text: {
-              tid: null, valign: 'middle', overflow: 'both', vposition: 'none', hposition: 'none',
-              html: `<p style="text-align:center;"><span style="font-size:11px;">${msg.label}</span></p>`,
-              paddingLeft: 0, paddingRight: 0, paddingBottom: 2, paddingTop: 2,
-              outerPaddingLeft: 6, outerPaddingRight: 6, outerPaddingBottom: 2, outerPaddingTop: 6,
-            },
-          },
-          children: null, layerId,
-        }] : [],
-        layerId, linkMap: [],
+        children: (opts && opts.children) || [], layerId: LAYER_ID, linkMap: [],
       };
-      objects.push(lineObj);
     }
 
+    // ==================================================================
+    // PHASE 1: Parse PlantUML into structured events
+    // ==================================================================
+    const srcLines = puml.split('\n');
+    const participants = [];
+    const events = [];
+    const sections = [];
+    let currentSection = null;
+    let inSkinparamBlock = false;
+    let inNote = false;
+    let notePosition = null;
+    let noteTarget = null;
+    let noteBody = [];
+
+    for (const line of srcLines) {
+      const l = line.trim();
+      if (!l || /^@start|^@end|^title\b|^!theme\b|^'/i.test(l)) continue;
+      if (/^skinparam\b/i.test(l)) { if (l.includes('{')) inSkinparamBlock = true; continue; }
+      if (inSkinparamBlock) { if (l.includes('}')) inSkinparamBlock = false; continue; }
+      if (/^\|\|\|$/.test(l)) continue;
+
+      const secMatch = l.match(/^==\s*(.+?)\s*==\s*$/);
+      if (secMatch) {
+        if (currentSection) sections.push(currentSection);
+        const sm = secMatch[1].match(/^Section\s+([\w]+)[:\s]*(.*)/i);
+        currentSection = { id: sm ? sm[1] : String(sections.length + 1), title: sm ? sm[2].trim() : secMatch[1], msgObjIds: [] };
+        events.push({ type: 'section', id: currentSection.id, title: currentSection.title });
+        continue;
+      }
+
+      if (/^end\s*note/i.test(l)) {
+        if (inNote && noteBody.length) events.push({ type: 'note', position: notePosition, target: noteTarget, text: noteBody.join('\n') });
+        inNote = false; noteBody = [];
+        continue;
+      }
+      if (inNote) { if (l) noteBody.push(l); continue; }
+      const noteInline = l.match(/^note\s+(right\s+of|left\s+of|over)\s+(.+?)\s*:\s*(.+)/i);
+      if (noteInline) { events.push({ type: 'note', position: noteInline[1], target: noteInline[2], text: noteInline[3] }); continue; }
+      const noteMulti = l.match(/^note\s+(right\s+of|left\s+of|over)\s+(.+)/i);
+      if (noteMulti) { inNote = true; notePosition = noteMulti[1]; noteTarget = noteMulti[2]; noteBody = []; continue; }
+      if (/^note\b/i.test(l)) { if (!l.includes(':')) inNote = true; continue; }
+
+      const fragStart = l.match(/^(alt|opt|loop|group|critical|break|par)\b\s*(.*)/i);
+      if (fragStart) { events.push({ type: 'fragment_start', kind: fragStart[1].toLowerCase(), label: fragStart[2].replace(/^#\w+\s*/, '').trim() }); continue; }
+      if (/^else\b/i.test(l)) { events.push({ type: 'fragment_else', label: l.replace(/^else\s*/i, '').trim() }); continue; }
+      if (/^end\s*$/i.test(l)) { events.push({ type: 'fragment_end' }); continue; }
+
+      const actMatch = l.match(/^(activate|deactivate)\s+(\S+)/i);
+      if (actMatch) { events.push({ type: actMatch[1].toLowerCase(), alias: actMatch[2] }); continue; }
+
+      const pMatch = l.match(/^(participant|actor|database)\s+"([^"]+)"\s+as\s+(\S+)/i);
+      if (pMatch) { participants.push({ type: pMatch[1].toLowerCase(), label: pMatch[2], alias: pMatch[3].replace(/#[0-9A-Fa-f]+$/, '') }); continue; }
+      const pSimple = l.match(/^(participant|actor|database)\s+(\S+)/i);
+      if (pSimple) { const a = pSimple[2].replace(/#[0-9A-Fa-f]+$/, ''); participants.push({ type: pSimple[1].toLowerCase(), label: a, alias: a }); continue; }
+
+      const arrowMatch = l.match(/^(\S+)\s*(<?--?>?>?|<?->>|<<?--?)\s*(\S+)\s*:\s*(.*)$/);
+      if (arrowMatch) {
+        let [, from, arrow, to, label] = arrowMatch;
+        if (arrow.startsWith('<')) { [from, to] = [to, from]; }
+        events.push({ type: 'message', from, to, label, isDashed: arrow.includes('--'), isAsync: arrow.includes('>>') });
+      }
+    }
+    if (currentSection) sections.push(currentSection);
+
+    // ==================================================================
+    // PHASE 2: Layout — walk events and emit Gliffy objects
+    // ==================================================================
+    const aliasToIdx = {};
+    const aliasToX = {};
+    for (let i = 0; i < participants.length; i++) {
+      aliasToIdx[participants[i].alias] = i;
+      aliasToX[participants[i].alias] = MARGIN_LEFT + i * SPACING_X + BOX_W / 2;
+    }
+    const diagL = MARGIN_LEFT;
+    const diagR = MARGIN_LEFT + Math.max(0, participants.length - 1) * SPACING_X + BOX_W;
+    const diagW = diagR - diagL;
+
+    const bgObjects = [];
+    const fgObjects = [];
+
+    // Participant header boxes
+    const pObjIds = {};
+    for (let i = 0; i < participants.length; i++) {
+      const p = participants[i];
+      const fill = p.type === 'database' ? '#F5F5F5' : p.type === 'actor' ? '#E8F5E9' : '#E3F2FD';
+      const box = mkRect(MARGIN_LEFT + i * SPACING_X, HEADER_Y, BOX_W, HEADER_H,
+        'com.gliffy.shape.uml.uml_v2.sequence.lifeline', fill, '#333333', 2,
+        [mkText(p.label, BOX_W - 4, 12, null)]);
+      pObjIds[p.alias] = box.id;
+      fgObjects.push(box);
+    }
+
+    let curY = LIFELINE_TOP;
+    const fragmentStack = [];
+    const actStarts = {};
+    const actRanges = [];
+    const sectionObjIds = {};
+    let activeSectionId = null;
+
+    for (const evt of events) {
+      switch (evt.type) {
+
+        case 'section': {
+          activeSectionId = evt.id;
+          if (!sectionObjIds[activeSectionId]) sectionObjIds[activeSectionId] = [];
+          curY += SECTION_GAP;
+          bgObjects.push(mkLine(diagL - 10, curY + SECTION_H / 2, diagW + 20, 0,
+            [[0, 0], [diagW + 20, 0]],
+            'com.gliffy.shape.uml.uml_v2.sequence.section_line',
+            { sc: '#888888', dash: [6, 4] }));
+          const tw = Math.min(evt.title.length * 8 + 24, 220);
+          bgObjects.push(mkRect(diagL + (diagW - tw) / 2, curY + 2, tw, SECTION_H - 4,
+            'com.gliffy.shape.uml.uml_v2.sequence.section_label', '#FFFFFF', '#888888', 1,
+            [mkText(evt.title, tw - 4, 11, { bold: true })]));
+          curY += SECTION_H + SECTION_GAP;
+          break;
+        }
+
+        case 'note': {
+          const alias = evt.target ? evt.target.replace(/,\s*/g, ',').split(',')[0].trim() : null;
+          const pIdx = alias ? aliasToIdx[alias] : 0;
+          const baseX = pIdx != null ? aliasToX[participants[pIdx].alias] : MARGIN_LEFT;
+          const isRight = /right/i.test(evt.position || 'right');
+          const nX = isRight ? baseX + BOX_W / 2 + 10 : baseX - BOX_W / 2 - NOTE_W - 10;
+          const textLines = evt.text.split('\n');
+          const nH = Math.max(NOTE_H, textLines.length * 16 + 12);
+          fgObjects.push(mkRect(Math.max(0, nX), curY, NOTE_W, nH,
+            'com.gliffy.shape.uml.uml_v2.sequence.note', '#FFFFCC', '#CCCC00', 1,
+            [mkText(textLines.join('\n'), NOTE_W - 8, 11, { x: 4, y: 4, h: nH - 8, valign: 'top', align: 'left' })]));
+          curY += nH + 8;
+          break;
+        }
+
+        case 'fragment_start': {
+          fragmentStack.push({ kind: evt.kind, label: evt.label, startY: curY, branches: [] });
+          curY += FRAG_LABEL_H;
+          break;
+        }
+
+        case 'fragment_else': {
+          if (fragmentStack.length) {
+            fragmentStack[fragmentStack.length - 1].branches.push({ label: evt.label, y: curY });
+            curY += FRAG_LABEL_H;
+          }
+          break;
+        }
+
+        case 'fragment_end': {
+          if (!fragmentStack.length) break;
+          const frag = fragmentStack.pop();
+          curY += FRAG_PAD;
+          const fX = diagL - 20;
+          const fW = diagW + 40;
+          const fH = curY - frag.startY;
+
+          bgObjects.push(mkRect(fX, frag.startY, fW, fH,
+            'com.gliffy.shape.uml.uml_v2.sequence.combined_fragment', '#F0F0FF', '#7B68EE', 1.5, null));
+
+          const kw = frag.kind.length * 9 + 12;
+          bgObjects.push(mkRect(fX, frag.startY, kw, 20,
+            'com.gliffy.shape.uml.uml_v2.sequence.fragment_label', '#E8E0FF', '#7B68EE', 1,
+            [mkText(frag.kind.toUpperCase(), kw - 4, 10, { bold: true })]));
+
+          if (frag.label) {
+            bgObjects.push(mkRect(fX + kw + 4, frag.startY + 2, frag.label.length * 7 + 16, 16,
+              'com.gliffy.shape.uml.uml_v2.sequence.fragment_condition', 'none', 'none', 0,
+              [mkText('[' + frag.label + ']', frag.label.length * 7 + 16, 10, { align: 'left' })]));
+          }
+
+          for (const br of frag.branches) {
+            bgObjects.push(mkLine(fX, br.y, fW, 0, [[0, 0], [fW, 0]],
+              'com.gliffy.shape.uml.uml_v2.sequence.fragment_separator',
+              { sc: '#7B68EE', dash: [6, 4] }));
+            if (br.label) {
+              bgObjects.push(mkRect(fX + 8, br.y + 2, br.label.length * 7 + 16, 16,
+                'com.gliffy.shape.uml.uml_v2.sequence.fragment_condition', 'none', 'none', 0,
+                [mkText('[' + br.label + ']', br.label.length * 7 + 16, 10, { align: 'left' })]));
+            }
+          }
+          curY += FRAG_PAD;
+          break;
+        }
+
+        case 'activate': {
+          if (!actStarts[evt.alias]) actStarts[evt.alias] = [];
+          actStarts[evt.alias].push(curY);
+          break;
+        }
+
+        case 'deactivate': {
+          const starts = actStarts[evt.alias];
+          if (starts && starts.length) actRanges.push({ alias: evt.alias, startY: starts.pop(), endY: curY });
+          break;
+        }
+
+        case 'message': {
+          const fi = aliasToIdx[evt.from];
+          const ti = aliasToIdx[evt.to];
+          if (fi == null || ti == null) break;
+          const fromX = aliasToX[evt.from];
+          const toX = aliasToX[evt.to];
+          const isSelf = fi === ti;
+          const endArrow = evt.isAsync ? 6 : 2;
+
+          if (isSelf) {
+            const lw = SELF_MSG_W;
+            const lh = SELF_MSG_H;
+            const lineObj = mkLine(fromX, curY, lw, lh,
+              [[0, 0], [lw, 0], [lw, lh], [0, lh]],
+              'com.gliffy.shape.uml.uml_v2.sequence.message',
+              { endArrow, dash: evt.isDashed ? [4, 4] : null, ortho: true, corner: 5 });
+            if (evt.label) {
+              const tc = mkText(evt.label, Math.max(evt.label.length * 6.5, 80), 11, { x: lw + 4, y: lh / 2 - 7 });
+              lineObj.children = [tc];
+            }
+            fgObjects.push(lineObj);
+            if (activeSectionId) sectionObjIds[activeSectionId].push(lineObj.id);
+            curY += lh + 18;
+          } else {
+            const minX = Math.min(fromX, toX);
+            const lw = Math.abs(toX - fromX);
+            const goesRight = toX > fromX;
+            const lineObj = mkLine(minX, curY, lw, 0,
+              goesRight ? [[0, 0], [lw, 0]] : [[lw, 0], [0, 0]],
+              'com.gliffy.shape.uml.uml_v2.sequence.message',
+              { endArrow, dash: evt.isDashed ? [4, 4] : null });
+            if (evt.label) {
+              const tc = mkText(evt.label, lw - 8, 11, { x: 4, y: -18 });
+              lineObj.children = [tc];
+            }
+            fgObjects.push(lineObj);
+            if (activeSectionId) sectionObjIds[activeSectionId].push(lineObj.id);
+            curY += MSG_SPACING;
+          }
+          break;
+        }
+      }
+    }
+
+    // Close unclosed activations
+    for (const alias of Object.keys(actStarts)) {
+      const starts = actStarts[alias];
+      while (starts && starts.length) actRanges.push({ alias, startY: starts.pop(), endY: curY });
+    }
+
+    // Lifeline dashed lines
+    const lifelineBottom = curY + 30;
+    for (let i = 0; i < participants.length; i++) {
+      const cx = aliasToX[participants[i].alias];
+      const topY = HEADER_Y + HEADER_H;
+      const lh = lifelineBottom - topY;
+      bgObjects.push(mkLine(cx, topY, 0, lh, [[0, 0], [0, lh]],
+        'com.gliffy.shape.uml.uml_v2.sequence.lifeline_dash',
+        { sc: '#999999', dash: [5, 5] }));
+    }
+
+    // Activation bars
+    for (const a of actRanges) {
+      const cx = aliasToX[a.alias];
+      const h = a.endY - a.startY;
+      if (h > 0) {
+        fgObjects.push(mkRect(cx - ACT_BAR_W / 2, a.startY, ACT_BAR_W, h,
+          'com.gliffy.shape.uml.uml_v2.sequence.activation', '#DAEEFF', '#6699CC', 1, null));
+      }
+    }
+
+    // Assemble objects: backgrounds first (lower z), then foreground
+    const allObjects = [...bgObjects, ...fgObjects];
+    for (let i = 0; i < allObjects.length; i++) allObjects[i].order = i;
+
+    // Resolve sections
     const resolvedSections = sections.map(sec => ({
-      id: sec.id,
-      title: sec.title,
-      objectIds: sec.objectIds.map(idx => msgIdxToObjId[idx]).filter(id => id !== undefined),
+      id: sec.id, title: sec.title,
+      objectIds: sectionObjIds[sec.id] || [],
     }));
 
-    const totalW = Math.max(400, 40 + participants.length * SPACING_X + 40);
-    const totalH = Math.max(300, LIFELINE_TOP + messages.length * SPACING_Y + 80);
+    const totalW = Math.max(400, diagR + 60);
+    const totalH = Math.max(300, lifelineBottom + 40);
 
     const result = {
       contentType: 'application/gliffy+json',
@@ -540,14 +812,14 @@ window.DiagramConverters = (function () {
       },
       embeddedResources: { index: 0, resources: [] },
       stage: {
-        objects,
+        objects: allObjects,
         background: '#FFFFFF',
         width: totalW, height: totalH, maxWidth: 5000, maxHeight: 5000,
         nodeIndex: nextId, autoFit: true, exportBorder: false,
         gridOn: true, snapToGrid: true, drawingGuidesOn: true,
         shapeStyles: {}, lineStyles: {}, textStyles: {}, themeData: null,
         viewportType: 'default',
-        layers: [{ guid: layerId, order: 0, name: 'Layer 0', active: true, locked: false, visible: true, nodeIndex: nextId }],
+        layers: [{ guid: LAYER_ID, order: 0, name: 'Layer 0', active: true, locked: false, visible: true, nodeIndex: nextId }],
         fitBB: { min: { x: 20, y: 20 }, max: { x: totalW, y: totalH } },
         printModel: { pageSize: 'Letter', portrait: true, fitToOnePage: false, displayPageBreaks: false },
       },
